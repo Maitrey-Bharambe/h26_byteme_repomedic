@@ -31,6 +31,19 @@ the AI features that will be unavailable. The run then proceeds deterministicall
 - **Baseline** table per Python, plus the **execution boundary** statement.
 - **Live pipeline events**: the same messages the CLI prints, with timestamps.
 
+## At a glance
+Four charts, all drawn from the run's own data, with hover tooltips:
+- **Verdicts**: a donut of exit outcomes, with "N/M exits proven" (verified + verified by
+  replay, out of executed exits) and a labelled legend with counts.
+- **Risk landscape**: risk score per dependency, sorted, with severity; hover shows the
+  indicators.
+- **Tests before → after**: passed vs failed per Python, for the baseline and the
+  combined migration.
+- **Pipeline timeline**: real stage durations from the live event stream (live runs only).
+
+The chart colours are validated for colour-vision deficiency in both light and dark mode
+(dataviz `validate_palette.js`). Gray is used only for labelled neutral states.
+
 ## 3 · Migration graph
 Four columns: **dependency** (severity accent and risk score) → **strategy** (action icon and
 target) → **individual verification** (status and the first unmet requirement) →

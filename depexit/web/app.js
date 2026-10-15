@@ -19,6 +19,7 @@ const TONE = { verified: "ok", verified_with_gaps: "warn", partial: "warn", fail
   incomplete: "idle", not_executed: "idle", planned: "info" };
 const ACTION_ICON = { upgrade: "↑", replace: "⇄", stdlib: "≡", remove: "✕", declare: "+", keep: "•" };
 const SEV_W = { critical: 100, high: 78, medium: 52, low: 28, info: 14, none: 4 };
+let allEvents = [];
 let job = null, events = 0, pollTimer = null, current = null, selected = new Set(), tab = "Overview", capData = null;
 
 // ------------------------------------------------------------------ helpers
@@ -108,7 +109,7 @@ $("#start-form").onsubmit = async (ev) => {
 };
 
 function attach(j) {
-  job = j; events = 0; selected.clear(); current = null; closeDrawer();
+  job = j; events = 0; allEvents = []; selected.clear(); current = null; closeDrawer();
   $("#log").textContent = "";
   $("#run-card").classList.remove("hidden");
   $("#run-id").textContent = job.id;
@@ -122,6 +123,7 @@ async function poll() {
   clearTimeout(pollTimer);
   try {
     const v = await api(`/api/jobs/${job.id}?since=${events}`);
+    allEvents.push(...v.events);
     for (const e of v.events) $("#log").textContent += `${new Date(e.t).toLocaleTimeString()}  ${e.stage.padEnd(8)}  ${e.msg}\n`;
     events = v.event_count;
     $("#ev-count").textContent = `(${events})`;
@@ -143,6 +145,7 @@ function renderRun(v) {
   if (!v.index) return;
   renderTiles(v.index);
   renderBaseline(v.index, v.execution_boundary);
+  renderGlance(v.index, v.state);
   renderGraph(v.index, v.state);
   renderEvidence(v.index);
   renderDeps(v.index, v.state, v.executable !== false);
@@ -719,4 +722,171 @@ async function renderEvidence(ix) {
         h("tbody", {}, diffs.map((x) => h("tr", { class: "diff-row" }, h("td", {}, h("b", {}, x.dep)), h("td", {}, code(x.function)),
           h("td", {}, code(clip(x.input, 50))), h("td", {}, code(clip(String(x.original), 50))), h("td", {}, code(clip(String(x.replacement), 50))),
           h("td", { class: "small" }, x.test || "–"))))))) : null);
+}
+
+// ------------------------------------------------------------------ "At a glance" charts
+const SVGNS = "http://www.w3.org/2000/svg";
+function sv(tag, attrs, ...kids) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v != null) el.setAttribute(k, v);
+  for (const k of kids.flat()) if (k != null) el.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return el;
+}
+// one shared tooltip: any element with data-tip shows it on hover
+(function tooltip() {
+  const tip = document.getElementById("tip");
+  document.addEventListener("mousemove", (e) => {
+    const t = e.target.closest && e.target.closest("[data-tip]");
+    if (!t) { tip.classList.remove("on"); return; }
+    tip.textContent = t.getAttribute("data-tip");
+    const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
+    tip.style.left = x + "px"; tip.style.top = y + "px"; tip.classList.add("on");
+  });
+})();
+
+const VERDICT_BUCKETS = [
+  { key: "proven", label: "Verified", st: ["verified", "verified_with_gaps"], color: "var(--c-good)" },
+  { key: "replay", label: "Verified by replay", st: ["verified_by_replay"], color: "var(--c-replay)" },
+  { key: "weak", label: "Weakly verified", st: ["weakly_verified"], color: "var(--c-weak)" },
+  { key: "failed", label: "Failed", st: ["failed", "tool_error"], color: "var(--c-fail)" },
+  { key: "incomplete", label: "Incomplete", st: ["incomplete"], color: "var(--c-neutral)" },
+  { key: "planned", label: "Planned · awaiting approval", st: ["planned"], color: "var(--c-neutral-2)" },
+  { key: "kept", label: "Kept (no safe exit)", st: ["not_executed"], color: "var(--c-neutral-2)", dashed: true },
+];
+
+function arc(cx, cy, r0, r1, a0, a1) {
+  const p = (r, a) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  const [x0, y0] = p(r1, a0), [x1, y1] = p(r1, a1), [x2, y2] = p(r0, a1), [x3, y3] = p(r0, a0);
+  return `M${x0},${y0} A${r1},${r1} 0 ${large} 1 ${x1},${y1} L${x2},${y2} A${r0},${r0} 0 ${large} 0 ${x3},${y3} Z`;
+}
+
+function vizVerdicts(ix) {
+  const deps = ix.dependencies.filter((d) => d.capsule && d.status);
+  const rows = VERDICT_BUCKETS.map((b) => ({ ...b, deps: deps.filter((d) => b.st.includes(d.status)).map((d) => d.name) }))
+    .filter((b) => b.deps.length);
+  if (!rows.length) return h("div", { class: "viz-empty" }, "No dependencies selected for an exit.");
+  const total = rows.reduce((a, b) => a + b.deps.length, 0);
+  const executed = rows.filter((b) => !["planned", "kept"].includes(b.key)).reduce((a, b) => a + b.deps.length, 0);
+  const proven = rows.filter((b) => ["proven", "replay"].includes(b.key)).reduce((a, b) => a + b.deps.length, 0);
+  const svg = sv("svg", { viewBox: "0 0 160 160", role: "img", "aria-label": "Verdict distribution" });
+  let a = 0;
+  const gap = rows.length > 1 ? 0.035 : 0;
+  for (const b of rows) {
+    const da = (b.deps.length / total) * Math.PI * 2;
+    const path = sv("path", { d: arc(80, 80, 50, 74, a + gap / 2, a + da - gap / 2), class: "vmark",
+      style: `fill:${b.color}` + (b.dashed ? ";stroke:var(--c-neutral);stroke-dasharray:3 2" : ""),
+      "data-tip": `${b.label}: ${b.deps.length}\n${b.deps.join(", ")}` });
+    if (da >= Math.PI * 2 - 1e-6) path.setAttribute("d", arc(80, 80, 50, 74, 0, Math.PI * 2 - 0.0001));
+    svg.append(path);
+    a += da;
+  }
+  const headline = executed ? `${proven}/${executed}` : String(total);
+  svg.append(sv("text", { x: 80, y: 80, "text-anchor": "middle", class: "hero-n" }, headline),
+    sv("text", { x: 80, y: 98, "text-anchor": "middle", class: "hero-l" }, executed ? "exits proven" : "planned"));
+  const legend = h("div", { class: "vlegend" }, rows.map((b) => h("div", { class: "row", "data-tip": b.deps.join(", ") },
+    h("span", { class: "sw", style: `background:${b.color}` + (b.dashed ? ";outline:1px dashed var(--c-neutral)" : "") }),
+    b.label, h("span", { class: "n" }, b.deps.length))));
+  return h("div", { class: "donut-wrap viz" }, svg, legend);
+}
+
+function vizRisk(ix) {
+  const deps = ix.dependencies.filter((d) => d.score > 0).sort((a, b) => b.score - a.score).slice(0, 12);
+  if (!deps.length) return h("div", { class: "viz-empty" }, "No risk indicators.");
+  const max = Math.max(...deps.map((d) => d.score)), W = 360, row = 22, left = 92, right = 64;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${deps.length * row + 4}`, role: "img", "aria-label": "Risk score per dependency" });
+  deps.forEach((d, k) => {
+    const y = k * row + 4, w = Math.max(4, ((W - left - right) * d.score) / max);
+    const tip = `${d.name} · ${d.max_severity} · score ${d.score}\n${d.indicators.join(", ")}`;
+    svg.append(
+      sv("text", { x: left - 8, y: y + 12, "text-anchor": "end", class: "ax" }, clip(d.name, 14)),
+      sv("rect", { x: left, y: y + 2, width: W - left - right, height: 12, rx: 3, style: "fill:var(--c-track)" }),
+      sv("rect", { x: left, y: y + 2, width: w, height: 12, rx: 3, class: "vmark", style: "fill:var(--c-bar)", "data-tip": tip }),
+      sv("text", { x: left + w + 6, y: y + 12, class: "ax" }, d.score),
+      sv("text", { x: W, y: y + 12, "text-anchor": "end", class: "ax-muted" }, d.max_severity),
+      sv("rect", { x: 0, y, width: W, height: row, class: "hit", "data-tip": tip }));
+  });
+  return h("div", { class: "viz" }, svg);
+}
+
+function vizTests(ix) {
+  const cb = ix.combined;
+  const pys = Object.keys(ix.baseline || {});
+  if (!pys.length) return h("div", { class: "viz-empty" }, "Baseline not run yet.");
+  const W = 320, left = 64, barW = W - left - 8, rowH = 20;
+  const rows = [];
+  for (const py of pys) {
+    const b = ix.baseline[py].tests.counts;
+    rows.push({ py, label: "before", p: b.passed, f: b.failed + b.error, note: "baseline (unmodified)" });
+    const c = cb && cb.comparison && cb.comparison[py];
+    if (c && c.install_ok && c.tests) {
+      const r = c.tests.replacement;
+      rows.push({ py, label: "after", p: r.passed, f: r.failed + r.error,
+        note: `combined: ${cb.dependencies.join(", ")}\nfixed ${c.tests.fixed.length} · regressed ${c.tests.regressed.length}` });
+    } else rows.push({ py, label: "after", empty: cb ? "combined install failed" : "no combined migration yet" });
+  }
+  const max = Math.max(...rows.map((r) => (r.p || 0) + (r.f || 0)), 1);
+  const H = rows.length * rowH + Math.floor(rows.length / 2) * 10 + 22;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Tests passing before and after migration" });
+  let y = 0;
+  rows.forEach((r, k) => {
+    if (k && k % 2 === 0) y += 10;
+    svg.append(sv("text", { x: left - 8, y: y + 13, "text-anchor": "end", class: r.label === "before" ? "ax" : "ax-muted" },
+      r.label === "before" ? `py${r.py} before` : "after"));
+    if (r.empty) {
+      svg.append(sv("text", { x: left, y: y + 13, class: "ax-muted" }, r.empty));
+    } else {
+      const pw = (barW * r.p) / max, fw = (barW * r.f) / max;
+      const tip = `Python ${r.py} ${r.label}: ${r.p} passed, ${r.f} failed/error\n${r.note}`;
+      svg.append(sv("rect", { x: left, y: y + 3, width: Math.max(pw - (fw ? 1 : 0), 0), height: 12, rx: 3, class: "vmark", style: "fill:var(--c-good)", "data-tip": tip }));
+      if (fw) svg.append(sv("rect", { x: left + pw + 1, y: y + 3, width: Math.max(fw - 1, 2), height: 12, rx: 3, class: "vmark", style: "fill:var(--c-fail)", "data-tip": tip }));
+      svg.append(sv("text", { x: left + pw + fw + 6, y: y + 13, class: "ax" }, `${r.p}/${r.p + r.f}`));
+    }
+    y += rowH;
+  });
+  const ly = y + 12;
+  svg.append(sv("rect", { x: left, y: ly - 8, width: 9, height: 9, rx: 2, style: "fill:var(--c-good)" }),
+    sv("text", { x: left + 14, y: ly, class: "ax-muted" }, "passed"),
+    sv("rect", { x: left + 68, y: ly - 8, width: 9, height: 9, rx: 2, style: "fill:var(--c-fail)" }),
+    sv("text", { x: left + 82, y: ly, class: "ax-muted" }, "failed / error"));
+  return h("div", { class: "viz" }, svg);
+}
+
+function vizTimeline() {
+  const evs = allEvents.filter((e) => e.t);
+  if (evs.length < 2) return null;
+  const order = [], first = {}, last = {}, count = {};
+  for (const e of evs) {
+    const t = Date.parse(e.t);
+    if (!(e.stage in first)) { first[e.stage] = t; order.push(e.stage); }
+    last[e.stage] = t; count[e.stage] = (count[e.stage] || 0) + 1;
+  }
+  const end = Date.parse(evs[evs.length - 1].t);
+  const segs = order.map((st, k) => ({ st, t0: first[st], t1: k + 1 < order.length ? first[order[k + 1]] : Math.max(last[st], end) }))
+    .filter((x) => x.st !== "done");
+  const t0 = segs[0].t0, span = Math.max(1, segs[segs.length - 1].t1 - t0);
+  const W = 1000, H = 54;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Stage durations" });
+  const fmt = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : `${Math.round(ms / 1000)}s`;
+  segs.forEach((g, k) => {
+    const x = ((g.t0 - t0) / span) * W, w = Math.max(3, ((g.t1 - g.t0) / span) * W - 2);
+    const tip = `${g.st}: ${fmt(g.t1 - g.t0)} · ${count[g.st] || 0} events\nstarted ${new Date(g.t0).toLocaleTimeString()}`;
+    svg.append(sv("rect", { x, y: 4, width: w, height: 22, rx: 4, class: "vmark",
+      style: `fill:var(--c-bar);opacity:${k % 2 ? 0.62 : 0.95}`, "data-tip": tip }));
+    if (w > 44) svg.append(sv("text", { x: x + 6, y: 19, class: "ax", style: "fill:var(--surface);font-weight:600" }, clip(g.st, Math.floor(w / 7))));
+    if (w > 44) svg.append(sv("text", { x: x + 2, y: 44, class: "ax-muted" }, fmt(g.t1 - g.t0)));
+  });
+  svg.append(sv("text", { x: W, y: 44, "text-anchor": "end", class: "ax" }, `total ${fmt(span)}`));
+  return h("div", { class: "viz" }, svg);
+}
+
+function renderGlance(ix, state) {
+  const card = $("#glance-card");
+  card.classList.remove("hidden");
+  $("#viz-verdicts").replaceChildren(vizVerdicts(ix));
+  $("#viz-risk").replaceChildren(vizRisk(ix));
+  $("#viz-tests").replaceChildren(vizTests(ix));
+  const tl = vizTimeline();
+  $("#viz-timeline-panel").classList.toggle("hidden", !tl);
+  if (tl) $("#viz-timeline").replaceChildren(tl);
 }

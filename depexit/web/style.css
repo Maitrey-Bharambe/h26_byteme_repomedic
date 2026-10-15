@@ -261,3 +261,39 @@ th input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px
 .rcell { display: flex; flex-direction: column; gap: 3px; }
 .ev-sub { font-size: 11.5px; color: var(--muted); }
 .inline-num input.only-input { width: 230px; }
+
+/* ---- chart palette (validated: dataviz validate_palette.js, light + dark) ---- */
+:root { --c-good: #3f7f3a; --c-replay: #2f6f9f; --c-weak: #c08a1e; --c-fail: #b23a2a;
+  --c-neutral: #a3968a; --c-neutral-2: #d8ccbb; --c-bar: #8a5a2e; --c-track: #efe6d8; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --c-good: #5ca857; --c-replay: #4a93cf; --c-weak: #b8841c; --c-fail: #e24a72;
+  --c-neutral: #7b6d5f; --c-neutral-2: #4a3c2e; --c-bar: #d09a5f; --c-track: #2d241b; } }
+:root[data-theme="dark"] { --c-good: #5ca857; --c-replay: #4a93cf; --c-weak: #b8841c; --c-fail: #e24a72;
+  --c-neutral: #7b6d5f; --c-neutral-2: #4a3c2e; --c-bar: #d09a5f; --c-track: #2d241b; }
+
+.glance { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr); gap: 14px; }
+.panel { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; background: var(--surface-2); min-width: 0; }
+.panel.wide { margin-top: 14px; }
+.panel-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); margin-bottom: 10px; }
+.panel-title .muted { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.viz svg { display: block; width: 100%; height: auto; overflow: visible; }
+.donut-wrap { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.donut-wrap svg { width: 150px; flex: 0 0 150px; }
+.vlegend { display: grid; gap: 5px; font-size: 12.5px; flex: 1; min-width: 140px; }
+.vlegend .row { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+.vlegend .sw { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 10px; }
+.vlegend .n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--ink-2); font-weight: 600; }
+.hero-n { font-size: 30px; font-weight: 800; fill: var(--ink); letter-spacing: -.02em; }
+.hero-l { font-size: 10.5px; fill: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.ax { font-size: 11px; fill: var(--ink-2); } .ax-muted { font-size: 10.5px; fill: var(--muted); }
+.vmark { cursor: default; transition: opacity .12s; } .vmark:hover { opacity: .82; }
+.hit { fill: transparent; }
+.tip { position: fixed; z-index: 100; pointer-events: none; max-width: 320px; background: var(--ink); color: var(--surface);
+  font-size: 12px; line-height: 1.45; padding: 7px 10px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+  opacity: 0; transform: translateY(4px); transition: opacity .1s, transform .1s; white-space: pre-line; }
+.tip.on { opacity: 1; transform: none; }
+.viz-empty { color: var(--muted); font-size: 12.5px; font-style: italic; padding: 18px 0; }
+.card { transition: box-shadow .2s; } .card:hover { box-shadow: 0 1px 2px rgba(60,40,20,.06), 0 10px 28px rgba(60,40,20,.08); }
+.card-head h2::before { content: ""; display: inline-block; width: 4px; height: 15px; border-radius: 2px; background: var(--accent);
+  margin-right: 9px; vertical-align: -2px; }
+@media (max-width: 1000px) { .glance { grid-template-columns: 1fr; } }

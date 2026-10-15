@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RepoMedic Workbench</title>
-<link rel="stylesheet" href="/static/style.css?v=4">
+<link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 <header class="top">
@@ -69,6 +69,19 @@
     </div>
   </section>
 
+  <section class="card hidden" id="glance-card">
+    <div class="card-head">
+      <div><h2>At a glance</h2>
+        <div class="muted small">Every chart is drawn from this run's capsules and live events. Hover for details.</div></div>
+    </div>
+    <div class="glance">
+      <div class="panel"><div class="panel-title">Verdicts</div><div id="viz-verdicts"></div></div>
+      <div class="panel"><div class="panel-title">Risk landscape <span class="muted">· score per dependency</span></div><div id="viz-risk"></div></div>
+      <div class="panel"><div class="panel-title">Tests before → after <span class="muted">· baseline vs combined migration</span></div><div id="viz-tests"></div></div>
+    </div>
+    <div class="panel wide" id="viz-timeline-panel"><div class="panel-title">Pipeline timeline <span class="muted">· real stage durations from the event stream</span></div><div id="viz-timeline"></div></div>
+  </section>
+
   <section class="card hidden" id="graph-card">
     <div class="card-head">
       <div><h2>Migration graph</h2>
@@ -126,6 +139,7 @@
 </aside>
 <div id="scrim" class="scrim hidden"></div>
 
-<script src="/static/app.js?v=4"></script>
+<div id="tip" class="tip" role="tooltip"></div>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>
