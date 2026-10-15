@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import sandbox
 from .risk import SEVERITY
+from .ghostbuster import render_md as ghostbuster_md
 from .replay import summary as replay_summary
 from .util import write_json
 
@@ -226,6 +227,7 @@ def build_capsule(dep, res, run_meta, out_root: Path) -> dict:
         "verification": verif,
         "test_blindness": res.get("test_blindness"),
         "replay": res.get("replay"),
+        "ghostbuster": res.get("ghostbuster"),
         "suggested_tests": {
             "existing_suite": {"provenance": "observed", "runner": "pytest",
                                "command": "python -m pytest -q"},
@@ -350,6 +352,7 @@ def render_md(c: dict) -> str:
         if rp.get("ai_generated_inputs"):
             ag = rp["ai_generated_inputs"]
             lines.append(f"- {BADGE['ai_generated']} extra inputs for {', '.join(ag['functions'])}: {ag['note']}")
+    lines += ghostbuster_md(c.get("ghostbuster"))
     vr = c.get("verification") or {}
     if vr.get("requirements"):
         lines += ["", f"### Verification requirements {BADGE.get(vr['provenance'], '')}", "",
@@ -432,6 +435,14 @@ def write_capsule(dep, res, run_meta, out_root: Path, repo_root: Path) -> dict:
     return cap
 
 
+def _ghost_summary(g: dict | None) -> dict | None:
+    if not g:
+        return None
+    return {"status": g.get("status"), "summary": g.get("summary"),
+            "build_commands": len((g.get("tooling") or {}).get("findings") or []),
+            "runtime_imports": len((g.get("runtime") or {}).get("findings") or [])}
+
+
 def _target(p: dict) -> str | None:
     if p.get("package"):
         return f"{p['package']}{p.get('specifier') or ''}"
@@ -458,6 +469,7 @@ def write_all(out: Path, run_meta, ranked, selected, results, combined) -> None:
                           "test_visibility_reason": (caps.get(d.name, {}).get("test_blindness") or {}).get("reason"),
                           "catching_tests": (caps.get(d.name, {}).get("test_blindness") or {}).get("catching_tests", []),
                           "replay": replay_summary(caps.get(d.name, {}).get("replay")) if d.name in sel else None,
+                          "ghostbuster": _ghost_summary(caps.get(d.name, {}).get("ghostbuster")),
                           "action": (caps.get(d.name, {}).get("proposed_replacement") or {}).get("action"),
                           "action_target": _target((caps.get(d.name, {}).get("proposed_replacement") or {})),
                           "capsule": f"capsules/{d.name}/CAPSULE.md" if d.name in sel else None}
@@ -518,6 +530,13 @@ def render_index(ix: dict) -> str:
             n = c["tests"]["replacement"]
             lines.append(f"| {py} | {n['passed']} | {n['failed']} | {n['error']} | {len(c['tests']['fixed'])} | "
                          f"{len(c['tests']['regressed'])} |")
+    ghosts = [d for d in ix["dependencies"] if d.get("ghostbuster")]
+    if ghosts:
+        lines += ["", "## GhostBuster: is the retired dependency really gone? (advisory)", "",
+                  "| Dependency | Status | Findings |", "|---|---|---|"]
+        lines += [f"| `{d['name']}` | {d['ghostbuster']['status']} | {d['ghostbuster'].get('summary') or ''} |" for d in ghosts]
+        lines.append("")
+        lines.append("Runtime evidence covers executed tests only; `not_observed` is not proof of absence.")
     if ix.get("manifest_drift"):
         lines += ["", f"## Manifest drift {BADGE['observed']}", ""]
         for name, dr in ix["manifest_drift"].items():

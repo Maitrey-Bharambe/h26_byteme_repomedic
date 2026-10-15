@@ -204,9 +204,18 @@ def scan_python(root: Path) -> tuple[list[UsageSite], list[dict]]:
 
 
 def scan_tooling(root: Path, scripts_by_dist: dict[str, list[str]],
-                 modules_by_dist: dict[str, list[str]]) -> list[tuple[str, UsageSite]]:
+                 modules_by_dist: dict[str, list[str]],
+                 extra_files: list[str] | None = None) -> list[tuple[str, UsageSite]]:
     """Find console-script / `python -m` usage of distributions in build & CI files."""
-    files = [root / f for f in TOOL_FILES if (root / f).is_file()]
+    files, seen = [], set()
+    for f in [*TOOL_FILES, *(extra_files or [])]:
+        p = root / f
+        if p.is_file():
+            st = p.stat()   # case-insensitive filesystems: Makefile and makefile are one file
+            key = (st.st_dev, st.st_ino) if st.st_ino else str(p.resolve()).lower()
+            if key not in seen:
+                seen.add(key)
+                files.append(p)
     wf = root / ".github" / "workflows"
     if wf.is_dir():
         files += sorted(wf.glob("*.y*ml"))

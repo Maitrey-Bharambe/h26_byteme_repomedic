@@ -26,11 +26,44 @@ def main(argv=None) -> int:
     a.add_argument("--jobs", type=int, default=4, help="dependencies processed in parallel")
     a.add_argument("--max-fix-attempts", type=int, default=2, help="Gemma fix-loop iterations after a failed verification")
     a.add_argument("--include-low", action="store_true", help="also build capsules for low/info-risk dependencies")
+    g = sub.add_parser("ghostbust", help="GhostBuster: find leftover references to a retired dependency")
+    g.add_argument("target", help="local repository path (it is copied; the original is never modified)")
+    g.add_argument("--retired", required=True, help="retired distribution name, e.g. nose")
+    g.add_argument("--module", action="append", help="its import name(s) if they differ from the name")
+    g.add_argument("--script", action="append", help="its console script(s), e.g. nosetests")
+    g.add_argument("--python", help="python of a venv where the repo's tests can run (enables the runtime check)")
+    g.add_argument("-o", "--out", default="ghostbuster-out", help="work/output directory")
     s = sub.add_parser("serve", help="start the local web interface (http://127.0.0.1:8765)")
     s.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1, local only)")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--runs", default="depexit-runs", help="directory for analysis runs")
     args = ap.parse_args(argv)
+
+    if args.cmd == "ghostbust":
+        import json as _json
+        from types import SimpleNamespace
+        from . import ghostbuster, sandbox
+        src = Path(args.target).resolve()
+        if not src.is_dir():
+            print(f"repomedic: target not found: {src}", file=sys.stderr)
+            return 2
+        out = Path(args.out).resolve()
+        rcopy = sandbox.copy_repo(src, out / "repo")
+        env = None
+        if args.python:
+            env = sandbox.Env("given", out, Path(args.python), Path(args.python).exists(), "")
+        dep = SimpleNamespace(name=args.retired, modules=args.module or [args.retired.replace("-", "_")])
+        g = ghostbuster.check(dep, {"action": "remove"}, rcopy, env, out / "work", args.script or [])
+        (out / "ghostbuster.json").write_text(_json.dumps(g, indent=2), encoding="utf-8")
+        try:  # Windows consoles default to cp1252; never crash on report symbols
+            sys.stdout.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+        for line in ghostbuster.render_md(g):
+            print(line)
+        print()
+        print(f"evidence: {out / 'ghostbuster.json'}")
+        return 0
 
     if args.cmd == "serve":
         from .server import serve

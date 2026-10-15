@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **GhostBuster (dependency exorcism mode)**: after a remove, replace or stdlib exit, it reports leftovers. *Zombie build commands* (observed): Makefile, tox, Dockerfile, CI workflows and pyproject entries still running the retired tool, with a rule-based fix such as `nosetests` → `python -m pytest`. *Runtime ghost imports* (executed): imports of the retired package, including `importlib.import_module`, observed while the migrated tests run, classified as repository or third-party. It is advisory and never changes a verdict. New command: `repomedic ghostbust <path> --retired nose [--python venv/python]`.
+- Fixed: build files were scanned twice on case-insensitive filesystems (`Makefile`/`makefile`).
 - **Test blindness check**: sabotages each used dependency symbol (raise / none / wrong) in the original suite and classifies the dependency as watched, partly blind, blind, not exercised, not run or not applicable, listing the tests that caught it.
 - **Replay check**: records real calls of the repository's own functions during the original tests and replays them on the migrated code (identical / different / exception changed / not replayable). Network-touching functions are skipped.
 - New verdicts `verified_by_replay` and `weakly_verified`, a *Test visibility* column, a replay table in the UI, and *Test visibility* and *Replay* columns in REPORT.md.

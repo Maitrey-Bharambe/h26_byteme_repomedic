@@ -134,6 +134,20 @@ state on the first call, so a pytest crash *caused* by the sabotage still counts
 5. Functions with fewer than 3 recorded calls list the Gemma behaviour probes as
    **ai_generated** extra inputs, reported separately from recorded evidence.
 
+### GhostBuster: is the retired dependency really gone? (advisory)
+
+`depexit/ghostbuster.py` and `_helpers/depexit_ghostbuster.py` run after verification, for
+`remove`, `replace` and `stdlib` exits only:
+
+| Part | Provenance | What it finds |
+|---|---|---|
+| Zombie build commands | observed | console scripts / `python -m <pkg>` of the retired distribution in Makefile, tox.ini, Dockerfile, noxfile, setup.cfg, Justfile, pre-commit, `.github/workflows/*.y*ml` and `pyproject.toml` (comments ignored; exact name match, so `nose2` is not `nose`). A known replacement (`nosetests` → `python -m pytest`) is suggested as **rule_based**; it is never applied automatically. |
+| Runtime ghost imports | executed | one extra run of the migrated suite with an observer on `builtins.__import__` and `importlib.import_module`, recording each import of the retired root with caller file:line, triggering test and origin (`repository` / `third_party` / `unknown`). Only in the child process; restored at session end. |
+
+Statuses: `observed_ghost`, `not_observed`, `not_run`, `error`. A failed check is never
+reported as `not_observed`, and `not_observed` covers only the executed tests and supported
+files. GhostBuster never changes the migration verdict.
+
 ### Final verdict
 
 | Verdict | When |

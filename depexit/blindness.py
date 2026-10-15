@@ -53,7 +53,7 @@ def _one(env, repo: Path, base: sandbox.TestRun, symbol: str, mode: str, wdir: P
     tr = sandbox.run_tests(env, rcopy, wdir / "results", plugins=("depexit_sabotage",),
                            extra_env={"DEPEXIT_SABOTAGE": json.dumps(cfg)}, timeout=timeout)
     st = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
-    res = {"symbol": symbol, "mode": mode, "command": tr.command + " -p depexit_sabotage",
+    res = {"symbol": symbol, "mode": mode, "command": tr.command,
            "exit_code": tr.exit_code, "seconds": round(tr.seconds, 1),
            "log": str(wdir / "results" / "pytest.log")}
     if tr.exit_code == -9:

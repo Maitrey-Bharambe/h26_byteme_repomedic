@@ -40,7 +40,7 @@ def record(env, repo: Path, targets: list[dict], work: Path, timeout: int = 1200
     rcopy = sandbox.copy_repo(repo, work / "repo")
     tr = sandbox.run_tests(env, rcopy, work / "results", plugins=("depexit_record",),
                            extra_env={"DEPEXIT_RECORD": str(cfg_file)}, timeout=timeout)
-    out["command"] = tr.command + " -p depexit_record"
+    out["command"] = tr.command
     out["test_counts"] = tr.counts()
     status_file = Path(str(rec_file) + ".status.json")
     if not status_file.exists():

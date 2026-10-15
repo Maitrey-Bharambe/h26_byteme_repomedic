@@ -44,6 +44,11 @@ Four charts, all drawn from the run's own data, with hover tooltips:
 The chart colours are validated for colour-vision deficiency in both light and dark mode
 (dataviz `validate_palette.js`). Gray is used only for labelled neutral states.
 
+## GhostBuster in the UI
+*Evidence quality* shows a 👻 headline for every exit that still has ghosts. The capsule's
+**Gaps** tab lists zombie build commands (location, old command, suggested replacement) and
+runtime ghost imports (import, caller, origin, test), labelled as advisory.
+
 ## 3 · Migration graph
 Four columns: **dependency** (severity accent and risk score) → **strategy** (action icon and
 target) → **individual verification** (status and the first unmet requirement) →

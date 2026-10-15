@@ -521,8 +521,28 @@ function tVerify(c) {
   return out;
 }
 
+function ghostSection(g) {
+  if (!g) return null;
+  const t = g.tooling || {}, r = g.runtime || {};
+  const tf = t.findings || [], rf = r.findings || [];
+  const tone = g.status === "observed_ghost" ? "warn" : g.status === "not_observed" ? "ok" : "info";
+  return h("div", {},
+    h("h3", {}, "GhostBuster: is ", code(g.retired_distribution), " really gone?"),
+    h("div", { class: "callout " + tone }, h("b", {}, g.status.replace("_", " ")), " · ", g.summary || "",
+      h("div", { class: "muted small" }, "Advisory: this does not change the migration verdict.")),
+    h("p", {}, h("b", {}, "Zombie build commands "), prov("observed"), ` ${t.status || "?"}`),
+    tf.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, ...["Location", "Old command", "Suggested replacement"].map((x) => h("th", {}, x)))),
+      h("tbody", {}, tf.map((f) => h("tr", { class: "diff-row" }, h("td", {}, code(`${f.file}:${f.line}`)), h("td", {}, code(f.command)),
+        h("td", {}, f.suggested_command ? [code(f.suggested_command), " ", prov("rule_based")] : h("span", { class: "muted" }, "no safe replacement known"))))))) : null,
+    h("p", {}, h("b", {}, "Runtime ghost imports "), prov("executed"), ` ${r.status || "?"}`, r.reason ? h("span", { class: "muted small" }, ` (${r.reason})`) : ""),
+    rf.length ? h("ul", { class: "checks" }, rf.map((f) => h("li", {}, code(f.attempted_import), ` via ${f.via} at `,
+      code(`${f.caller_file}:${f.caller_line}`), h("span", { class: "muted small" }, ` ${f.origin}${f.test ? " · " + f.test : ""}`)))) : null,
+    h("p", { class: "muted small" }, "Runtime evidence covers executed tests only; not observed is not proof of absence."));
+}
+
 function tGaps(c) {
-  const out = [h("h3", {}, "Compatibility gaps ", prov("executed"))];
+  const out = [ghostSection(c.ghostbuster), h("h3", {}, "Compatibility gaps ", prov("executed"))];
   out.push(c.compatibility_gaps.length ? h("ul", { class: "checks" }, c.compatibility_gaps.map((g) =>
     h("li", {}, prov(g.provenance), h("span", {}, h("b", {}, g.kind), h("span", { class: "muted small" }, ` py ${g.pythons.join(", ")}`), h("div", {}, g.detail))))) : empty("No gaps observed in what was executed."));
   if (c.ai_review) out.push(h("h3", {}, "Interpretation ", prov("ai_generated")), h("p", {}, c.ai_review.summary || ""),
@@ -659,6 +679,10 @@ function findingsFor(rows) {
       out.push(["bad", "✗", h("span", {}, h("b", {}, d.name), `: the tests pass, but replaying ${diff} real recorded call(s) gives a different result. `,
         code(x.function || ""), " returned ", code(String(x.original)), " before and ", code(String(x.replacement)), " after",
         x.test ? ` (recorded in ${x.test})` : "", ".")]);
+    } else if (c.ghostbuster && c.ghostbuster.status === "observed_ghost") {
+      const f = ((c.ghostbuster.tooling || {}).findings || [])[0];
+      out.push(["warn", "👻", h("span", {}, h("b", {}, d.name), ": retired, but still haunting the repo: ", c.ghostbuster.summary,
+        f ? [" (", code(`${f.file}:${f.line}`), " ", code(f.command), f.suggested_command ? [" → ", code(f.suggested_command)] : "", ")"] : "", ".")]);
     } else if (tb.classification === "not_exercised") {
       out.push(["warn", "∅", h("span", {}, h("b", {}, d.name), ": no test ever calls ", (tb.symbols || []).flatMap((s, i) => [i ? ", " : "", code(s)]),
         ", so a passing suite proves nothing about this dependency", d.status === "verified_by_replay" ? ", but real recorded calls replayed identically." : ".")]);

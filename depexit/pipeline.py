@@ -12,7 +12,7 @@ from pathlib import Path
 
 from packaging.utils import canonicalize_name
 
-from . import TOOL_NAME, __version__, ai, blindness, capsule, manifests, metadata, replay, risk, sandbox, usage, verification
+from . import TOOL_NAME, __version__, ai, blindness, capsule, ghostbuster, manifests, metadata, replay, risk, sandbox, usage, verification
 from .compare import compare_probes, compare_tests, compare_warnings, failure_feedback, unified_diff
 from .llm import LLM, LLMConfig, LLMError
 from .util import HttpCache, log, run, write_json
@@ -468,6 +468,16 @@ class Pipeline:
         res.update({k: best[k] for k in ("comparison", "edits", "manifest_files", "patch", "repo", "residual")})
         res["verification"] = best["evaluation"]
         res["replay"] = best.get("replay")
+        # GhostBuster: advisory retirement-completeness evidence; never changes the verdict above
+        try:
+            res["ghostbuster"] = ghostbuster.check(
+                dep, plan, best["repo"], (best.get("envs") or {}).get(self.pythons[0]),
+                dwork / "ghostbuster", self.scripts.get(dep.name, []))
+        except Exception as exc:
+            res["ghostbuster"] = {"retired_distribution": dep.name, "advisory": True, "status": "error",
+                                  "summary": f"GhostBuster failed: {type(exc).__name__}: {exc}"}
+        if res.get("ghostbuster"):
+            self.say(f"{name}: GhostBuster {res['ghostbuster']['status']}: {res['ghostbuster'].get('summary')}", dep=name)
         res["status"] = best["evaluation"]["status"]
         unmet = "; ".join(f"{r['id']}: {r['result']}" for r in best["evaluation"]["requirements"]
                           if r["result"] != verification.MET and r["required"])
@@ -541,7 +551,7 @@ class Pipeline:
         summary["residual_usage"] = len(residual)
         return {"comparison": comparison, "edits": edits, "manifest_files": manifest_files,
                 "patch": patch, "repo": rcopy, "clean": clean, "summary": summary, "residual": residual,
-                "evaluation": evaluation, "replay": rp}
+                "evaluation": evaluation, "replay": rp, "envs": envs}
 
     def _replay(self, dep, comparison, envs, rcopy, adir) -> dict | None:
         """Replay recorded real calls on the migrated code (first Python, same as the recording)."""
