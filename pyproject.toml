@@ -8,11 +8,37 @@ version = "0.1.0"
 description = "Gemma 4 powered dependency risk analysis that produces verifiable Dependency Exit Capsules"
 readme = "README.md"
 license = { text = "MIT" }
+authors = [{ name = "depexit contributors" }]
 requires-python = ">=3.11"
+keywords = ["dependencies", "supply-chain", "migration", "gemma", "pytest", "sbom", "verification"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = ["packaging>=23"]
+
+[project.optional-dependencies]
+web = ["flask>=3"]
+test = ["pytest>=8", "flask>=3"]
 
 [project.scripts]
 depexit = "depexit.cli:main"
 
 [tool.setuptools]
-packages = ["depexit", "depexit._helpers"]
+packages = ["depexit", "depexit._helpers", "depexit.web"]
+
+[tool.setuptools.package-data]
+"depexit.web" = ["*.html", "*.css", "*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -104,9 +104,95 @@ depexit analyze ./LinkWatch --no-llm
 | `--jobs` | 4 | Dependencies processed in parallel |
 | `--include-low` | off | Also build capsules for low/info risks |
 
+Ollama is driven through its native `/api/chat` endpoint with an explicit context window
+(`DEPEXIT_LLM_NUM_CTX`, default 8192) and thinking disabled. Its OpenAI-compatible
+endpoint silently truncates prompts to the server default (often 4096 tokens). A prompt
+that fills the window is reported as an error, never silently truncated. Other knobs:
+`DEPEXIT_LLM_TIMEOUT` (seconds per call, default 900).
+
+## Web workbench
+
+```bash
+pip install -e ".[web]"
+depexit serve                 # http://127.0.0.1:8765, local only
+```
+
+1. **Analyse & plan**: enter a repository URL (the LinkWatch button fills the organizer repo) or
+   a local path inside `DEPEXIT_ALLOWED_ROOTS` (default: the server's working directory). This runs
+   the real pipeline's inspect, baseline, risk and plan stages and streams its events. **No code is modified.**
+2. **Risk explorer**: each dependency shows declarations, usage sites, risk indicators with their
+   evidence source, the proposed strategy, the API mapping cross-checked against observed usage
+   (unmapped symbols are listed), deterministic validation of the model output, the verification
+   requirements decided *before* execution, and unresolved uncertainties. Provenance badges
+   separate *observed*, *executed*, *AI · Gemma* and *rule* content.
+3. **Migrate & verify**: select planned dependencies. Each one is migrated in its own working copy
+   and verified on every target Python; then every verified exit is merged and re-verified together.
+4. **Proof**: every view renders the backend's `capsule.json` and links the capsule files (JSON,
+   Markdown, `migration.patch`, test logs, probes, model-call logs). A patch can be applied to a
+   *fresh working copy* (`<run>/applied/<dep>`). The analysed repository is never changed.
+
+The header shows the real model status (`GET /models` on the local endpoint). If Gemma is
+unavailable, the UI lists the AI features that are off, and the run continues deterministically.
+
+### Verification semantics
+
+Each exit has explicit requirements; each one evaluates to `met`, `failed` or `not_checked`:
+
+| Status | Meaning |
+|---|---|
+| `verified` | every requirement executed and met |
+| `verified_with_gaps` | all required checks met; advisory ones (new warnings, probes for manifest-only changes, tooling references, transitive installs) failed or did not run |
+| `incomplete` | nothing failed, but a required check could not be performed (for example, the baseline has no passing test, or the code was rewritten but no behaviour probe ran) |
+| `failed` | a required check failed: install, new collection error, regression, a baseline-passing test that no longer runs, leftover usage, a replacement that won't import, or a version that doesn't satisfy the plan |
+
+A successful install never verifies anything by itself, and a skipped check is never counted
+as passed. The combined result has its own status (`verified` / `partial` / `failed` /
+`incomplete`) and lists conflicts, exits that were not combined, regressions and leftover usage.
+
+### Execution boundary
+
+Repository code (install hooks, tests, probes) runs as child processes in per-run working
+copies, with an **allowlisted environment** (no API keys, tokens or `DEPEXIT_LLM_*`), HOME and TMP
+redirected into the run directory, and timeouts. **Virtual environments are not a security
+boundary**: that code can still read your files and use the network as your user. The UI
+requires an explicit acknowledgement per run, and every report carries this boundary. For
+untrusted repositories, run depexit itself inside a disposable VM or container. The server
+binds to 127.0.0.1, rejects foreign `Host` headers, accepts only JSON POSTs, serves only
+capsule artifacts and refuses non-local model endpoints (`DEPEXIT_ALLOW_REMOTE_LLM=1` overrides).
+
+## Tests
+
+```bash
+pip install -e ".[test]"
+python -m pytest
+```
+
+The tests use no network and no model: model replies are deterministic fakes, and the
+execution layer (`sandbox`) is scripted, while the pipeline, verification, merge, capsule and
+HTTP API code under test is real. They cover manifest handling, usage detection, plan and
+API-mapping validation, edit validation, verification outcomes, regression detection, capsule
+generation and the HTTP API. Scenarios include a migration that fails verification, incomplete
+verification, and individual passes with a failed combined result.
+
 ## Limitations
 
 - Python projects only (pip/uv-style manifests: requirements files and PEP 621 `pyproject.toml`).
 - Behaviour probes are only as good as the edge cases Gemma chooses; they add coverage but do not prove equivalence.
 - Advisory data comes from the PyPI JSON API; reachability of a vulnerable function is not yet analysed.
 - Non-Python references (Makefile, CI) are detected and reported as gaps but not rewritten.
+
+## Documentation
+
+Full docs are in [`docs/`](docs/README.md): [getting started](docs/getting-started.md) ·
+[architecture](docs/architecture.md) · [verification semantics](docs/verification.md) ·
+[web workbench](docs/web-ui.md) · [HTTP API](docs/http-api.md) ·
+[capsule format](docs/capsule-format.md) · [configuration](docs/configuration.md) ·
+[testing](docs/testing.md).
+
+## Contributing, security, license
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): setup, ground rules, good first issues (Hacktoberfest welcome)
+- [SECURITY.md](SECURITY.md): what depexit executes, the execution boundary, private reporting
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · [CHANGELOG.md](CHANGELOG.md)
+- Licensed under the [MIT License](LICENSE). Third-party components and model terms:
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

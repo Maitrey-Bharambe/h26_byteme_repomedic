@@ -23,10 +23,13 @@ def compare_tests(base: TestRun, new: TestRun) -> dict:
     for nid in new.tests:
         if nid not in base.tests:
             added.append(nid)
+    # a baseline-passing test that silently disappears is not evidence of success
+    vanished = [nid for nid in missing if base.tests[nid]["outcome"] == "passed"]
     return {
         "original": base.counts(), "replacement": new.counts(),
         "fixed": fixed, "regressed": regressed, "still_failing": still,
-        "not_run_in_replacement": missing, "only_in_replacement": added,
+        "not_run_in_replacement": missing, "vanished_passing": vanished,
+        "only_in_replacement": added,
         "original_collection_error": base.collection_error,
         "replacement_collection_error": new.collection_error,
     }
@@ -78,6 +81,9 @@ def failure_feedback(cmp_by_py: dict, modules: dict, residual: list | None = Non
             lines.append(f"[Python {py}] test collection failed:\n{t['replacement_collection_error'][-1500:]}")
         for r in t["regressed"][:5]:
             lines.append(f"[Python {py}] {r['test']} now fails:\n{r['message'][-1200:]}")
+        if c.get("install_ok", True) and t.get("vanished_passing"):
+            lines.append(f"[Python {py}] these previously passing tests no longer run: "
+                         + ", ".join(t["vanished_passing"][:10]))
         for d in (c.get("probes") or {}).get("different", [])[:8]:
             lines.append(f"[Python {py}] behaviour probe `{d['probe']}` differs: "
                          f"original={d['original']} replacement={d['replacement']}")

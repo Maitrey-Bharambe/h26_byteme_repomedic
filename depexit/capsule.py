@@ -21,12 +21,16 @@ SCHEMA = "dependency-exit-capsule/1.0"
 BADGE = {"observed": "🔎 OBSERVED", "executed": "🧪 EXECUTED", "ai_generated": "🤖 AI-GENERATED (Gemma 4)",
          "rule_based": "⚙️ RULE-BASED"}
 STATUS_TEXT = {
-    "verified": "✅ Verified: replacement installs, no test regressions, no behaviour differences",
-    "verified_with_gaps": "🟡 Verified with gaps: no test regressions, but probes or warnings show differences",
-    "failed": "❌ Failed verification: see compatibility gaps",
+    "verified": "✅ Verified: every verification requirement was executed and met",
+    "verified_with_gaps": "🟡 Verified with gaps: all required checks met; advisory checks failed or were not run",
+    "incomplete": "⚪ Incomplete: nothing failed, but at least one required check could not be performed",
+    "failed": "❌ Failed verification: a required check failed (see requirements and gaps)",
+    "planned": "📝 Planned: proposal ready for review, nothing executed yet",
+    "partial": "🟠 Partial: some verified migrations could not be merged",
     "not_executed": "⏸️ Not executed: no safe replacement proposed",
     "tool_error": "⚠️ Tool error during this capsule",
 }
+RESULT_ICON = {"met": "✅", "failed": "❌", "not_checked": "⚪", "pending": "⏳"}
 INFO_ONLY = "ℹ️ Informational only"
 
 
@@ -63,6 +67,9 @@ def compatibility_gaps(dep, res, modules) -> list[dict]:
             last = [l for l in r["message"].splitlines() if l.strip()]
             gaps.append({"provenance": "executed", "python": py, "kind": "test-regression",
                          "detail": f"{r['test']}: {last[-1][:300] if last else ''}"})
+        for nid in t.get("vanished_passing") or []:
+            gaps.append({"provenance": "executed", "python": py, "kind": "test-not-run",
+                         "detail": f"{nid} passed on the baseline but did not run after migration"})
         for nid in t["still_failing"]:
             orig_msg = (res.get("_baseline_msgs") or {}).get(py, {}).get(nid, "")
             if modules is not None and dep.name not in sandbox.attribute_text(orig_msg, modules):
@@ -127,6 +134,7 @@ def open_concerns(dep, res, repo: Path, llm_on: bool) -> list[dict]:
         out.append({"provenance": "observed",
                     "text": f"Private API `{priv[0]['symbol']}` remains a future-break risk "
                             f"({priv[0]['file']}:{priv[0]['line']})."})
+    out += res.get("uncertainties") or []
     for c in (res.get("review") or {}).get("open_concerns", [])[:6]:
         out.append({"provenance": "ai_generated", "text": str(c)})
     for r in (res.get("plan") or {}).get("risks", [])[:6]:
@@ -160,13 +168,22 @@ def build_capsule(dep, res, run_meta, out_root: Path) -> dict:
     plan = res.get("plan") or {}
     prov = plan.get("provenance", "rule_based")
     files = sorted({u["file"] for u in dep.usage})
+    ver = res.get("verification")
+    if ver:
+        verif = {"provenance": "executed", "status": ver["status"], "requirements": ver["requirements"]}
+    else:  # planned or not executed: requirements are known, results are not
+        verif = {"provenance": "rule_based", "status": None,
+                 "requirements": [{**r, "result": "pending", "evidence": []}
+                                  for r in res.get("verification_requirements") or []]}
     return {
         "schema": SCHEMA,
         "tool": run_meta["tool"],
         "generated_at": run_meta["generated_at"],
         "target": run_meta["target"],
         "ai": run_meta["ai"],
+        "execution_boundary": run_meta.get("execution_boundary"),
         "status": res.get("status"),
+        "status_reason": res.get("status_reason") or res.get("error"),
         "dependency": {
             "provenance": "observed",
             "name": dep.name,
@@ -189,6 +206,8 @@ def build_capsule(dep, res, run_meta, out_root: Path) -> dict:
             "action": plan.get("action"), "package": plan.get("package"),
             "specifier": plan.get("specifier"), "stdlib_module": plan.get("stdlib_module"),
             "rationale": plan.get("rationale"), "api_mapping": plan.get("api_mapping", []),
+            "api_mapping_review": res.get("api_mapping_review"),
+            "needs_code_changes": plan.get("needs_code_changes"),
             "model_calls": res.get("llm_calls", []),
             "rejected_ai_plan": res.get("rejected_ai_plan"),
         },
@@ -198,6 +217,7 @@ def build_capsule(dep, res, run_meta, out_root: Path) -> dict:
                             "code_changes_provenance": "ai_generated" if res.get("edits") else None,
                             "patch": "migration.patch" if res.get("patch") else None},
         "validation_of_ai_output": {"provenance": "observed", "checks": res.get("validation", [])},
+        "verification": verif,
         "suggested_tests": {
             "existing_suite": {"provenance": "observed", "runner": "pytest",
                                "command": "python -m pytest -q"},
@@ -222,6 +242,7 @@ def render_md(c: dict) -> str:
     prov = p["provenance"]
     lines = [f"# Dependency Exit Capsule: `{d['name']}`", "",
              f"**Status:** {STATUS_TEXT.get(c['status'], c['status'])}  ",
+             *( [f"**Why:** {c['status_reason']}  "] if c.get("status_reason") else []),
              f"**Target:** {c['target']['source']} @ `{(c['target'].get('commit') or 'n/a')[:10]}` · "
              f"Python {', '.join(c['target']['pythons'])}  ",
              f"**AI:** " + (f"{c['ai'].get('model')} via {c['ai'].get('base_url')}" if c["ai"].get("reachable")
@@ -293,6 +314,14 @@ def render_md(c: dict) -> str:
     att = c["executed_test_results"]["attempts"]
     if len(att) > 1:
         lines += ["", f"Fix loop: {len(att)} attempts; Gemma received the executed failures as feedback after each failed attempt."]
+    vr = c.get("verification") or {}
+    if vr.get("requirements"):
+        lines += ["", f"### Verification requirements {BADGE.get(vr['provenance'], '')}", "",
+                  "| Result | Required | Requirement | Evidence |", "|---|---|---|---|"]
+        for r in vr["requirements"]:
+            ev = "; ".join(str(e) for e in (r.get("evidence") or []))[:220].replace("|", "/")
+            lines.append(f"| {RESULT_ICON.get(r['result'], r['result'])} {r['result']} | "
+                         f"{'yes' if r['required'] else 'advisory'} | {r['description']} | {ev or '–'} |")
     lines += ["", f"## 8. Compatibility gaps {BADGE['executed']}", "",
               _md_list(c["compatibility_gaps"],
                        lambda g: f"- **{g['kind']}** (py {', '.join(g['pythons'])}): {g['detail']}")]
@@ -367,6 +396,14 @@ def write_capsule(dep, res, run_meta, out_root: Path, repo_root: Path) -> dict:
     return cap
 
 
+def _target(p: dict) -> str | None:
+    if p.get("package"):
+        return f"{p['package']}{p.get('specifier') or ''}"
+    if p.get("stdlib_module"):
+        return f"stdlib {p['stdlib_module']}"
+    return None
+
+
 def write_all(out: Path, run_meta, ranked, selected, results, combined) -> None:
     repo_root = Path(run_meta.get("_repo") or ".")
     caps = {}
@@ -380,7 +417,9 @@ def write_all(out: Path, run_meta, ranked, selected, results, combined) -> None:
                           "max_severity": d.max_severity,
                           "indicators": [i["id"] for i in d.indicators],
                           "status": caps.get(d.name, {}).get("status"),
+                          "status_reason": caps.get(d.name, {}).get("status_reason"),
                           "action": (caps.get(d.name, {}).get("proposed_replacement") or {}).get("action"),
+                          "action_target": _target((caps.get(d.name, {}).get("proposed_replacement") or {})),
                           "capsule": f"capsules/{d.name}/CAPSULE.md" if d.name in sel else None}
                          for d in ranked],
     }
@@ -398,6 +437,7 @@ def render_index(ix: dict) -> str:
     lines = ["# Dependency Exit Report", "",
              f"Target: {t['source']} @ `{(t.get('commit') or 'n/a')[:10]}` · Python {', '.join(t['pythons'])} · "
              f"AI: {ix['ai'].get('model') if ix['ai'].get('reachable') else 'not used'} · {ix['seconds']}s", "",
+             f"> Execution boundary: {(ix.get('execution_boundary') or {}).get('detail', 'n/a')}", "",
              f"## Baseline {BADGE['executed']}", "", "| Python | Install | Passed | Failed | Errors | Collection error |",
              "|---|---|---|---|---|---|"]
     for py, b in ix["baseline"].items():
@@ -414,7 +454,10 @@ def render_index(ix: dict) -> str:
     if ix.get("combined"):
         cb = ix["combined"]
         lines += ["", f"## All verified exits applied together {BADGE['executed']}", "",
+                  f"**Combined status:** {STATUS_TEXT.get(cb.get('status'), cb.get('status'))}  ",
                   f"Dependencies: {', '.join(cb['dependencies'])}  ",
+                  f"Not combined (not verified individually): "
+                  f"{', '.join(e['dependency'] + ' (' + str(e['status']) + ')' for e in cb.get('excluded_unverified', [])) or 'none'}  ",
                   f"Merge conflicts: {cb['conflicts'] or 'none'}  ",
                   f"Re-applied by Gemma on the combined tree: "
                   f"{', '.join(r['dependency'] for r in cb.get('rebased_by_ai', [])) or 'none'}  ",

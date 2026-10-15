@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .llm import LLMConfig
-from .pipeline import Pipeline
+from .pipeline import Pipeline, PipelineError
 
 
 def main(argv=None) -> int:
@@ -26,7 +26,16 @@ def main(argv=None) -> int:
     a.add_argument("--jobs", type=int, default=4, help="dependencies processed in parallel")
     a.add_argument("--max-fix-attempts", type=int, default=2, help="Gemma fix-loop iterations after a failed verification")
     a.add_argument("--include-low", action="store_true", help="also build capsules for low/info-risk dependencies")
+    s = sub.add_parser("serve", help="start the local web interface (http://127.0.0.1:8765)")
+    s.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1, local only)")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--runs", default="depexit-runs", help="directory for analysis runs")
     args = ap.parse_args(argv)
+
+    if args.cmd == "serve":
+        from .server import serve
+        serve(args.host, args.port, Path(args.runs))
+        return 0
 
     if args.cmd == "analyze":
         cfg = None
@@ -37,8 +46,12 @@ def main(argv=None) -> int:
             if args.base_url:
                 cfg.base_url = args.base_url
         pythons = args.pythons or ["3.12", "3.13"]
-        out = Pipeline(args.target, Path(args.out), pythons, cfg, only=args.only, jobs=args.jobs,
-                       max_fix_attempts=args.max_fix_attempts, include_low=args.include_low).execute()
+        try:
+            out = Pipeline(args.target, Path(args.out), pythons, cfg, only=args.only, jobs=args.jobs,
+                           max_fix_attempts=args.max_fix_attempts, include_low=args.include_low).execute()
+        except PipelineError as exc:
+            print(f"depexit: {exc}", file=sys.stderr)
+            return 2
         print(out / "REPORT.md")
     return 0
 

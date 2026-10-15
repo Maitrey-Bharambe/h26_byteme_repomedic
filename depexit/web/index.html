@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depexit Workbench</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 12h11M11 6l6 6-6 6M20 5v14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    <div><div class="brand-name">depexit</div><div class="brand-sub">Dependency exit workbench</div></div>
+  </div>
+  <div class="top-right">
+    <div id="llm-pill" class="pill"><span class="dot"></span><span class="txt">Gemma: checking…</span></div>
+    <button class="icon-btn" id="theme-btn" title="Toggle light/dark" aria-label="Toggle theme">◐</button>
+  </div>
+</header>
+
+<main>
+  <section class="card hero" id="start-card">
+    <div class="hero-head">
+      <div>
+        <h1>Analyse a repository</h1>
+        <p class="muted">Inspect, baseline, score risk and plan migrations. Nothing is modified until you approve a plan.</p>
+      </div>
+    </div>
+    <form id="start-form" autocomplete="off">
+      <div class="target-row">
+        <input id="target" name="target" required placeholder="https://github.com/owner/repo  or  a local folder" aria-label="Repository URL or local path">
+        <button type="button" class="chip-btn" id="fill-linkwatch" title="Organizer-provided repository">Use LinkWatch</button>
+        <button type="submit" id="start-btn" class="primary">Analyse &amp; plan</button>
+      </div>
+      <div class="opts">
+        <div class="opt-group"><span class="opt-label">Target Pythons</span>
+          <label class="toggle"><input type="checkbox" name="py" value="3.12" checked><span>3.12</span></label>
+          <label class="toggle"><input type="checkbox" name="py" value="3.13" checked><span>3.13</span></label>
+        </div>
+        <div class="opt-group"><span class="opt-label">Gemma 4 · local</span>
+          <label class="toggle"><input type="checkbox" id="use-llm" checked><span>use model</span></label>
+          <select id="model" aria-label="Model"></select>
+        </div>
+        <div class="opt-group"><span class="opt-label">Options</span>
+          <label class="toggle"><input type="checkbox" id="include-low"><span>low-risk too</span></label>
+          <label class="inline-num">fix attempts <input type="number" id="fix" min="0" max="3" value="2"></label>
+        </div>
+      </div>
+      <div id="llm-note" class="callout warn hidden"></div>
+      <label class="ack"><input type="checkbox" id="ack" required>
+        <span>I understand the repository's install hooks and tests will <b>execute on this machine</b>. Working copies, a scrubbed environment and timeouts are used, but there is <b>no OS-level isolation</b>.</span></label>
+      <div id="start-error" class="callout bad hidden"></div>
+    </form>
+  </section>
+
+  <section class="card hidden" id="run-card">
+    <div class="card-head">
+      <div><h2>Run <code id="run-id"></code></h2><div class="muted small" id="run-target"></div></div>
+      <span id="run-state" class="status"></span>
+    </div>
+    <ol class="progress" id="stepper"></ol>
+    <div id="run-error" class="callout bad hidden"></div>
+    <div class="tiles" id="tiles"></div>
+    <div class="split">
+      <div id="baseline"></div>
+      <details id="log-box"><summary>Live pipeline events <span id="ev-count" class="muted"></span></summary>
+        <pre id="log" class="log"></pre></details>
+    </div>
+  </section>
+
+  <section class="card hidden" id="graph-card">
+    <div class="card-head">
+      <div><h2>Migration graph</h2>
+        <div class="muted small">Dependency → strategy → individual verification → combined re-verification. Click a node for its capsule.</div></div>
+      <div class="legend" id="graph-legend"></div>
+    </div>
+    <div id="graph" class="graph-wrap"></div>
+  </section>
+
+  <section class="card hidden" id="deps-card">
+    <div class="card-head">
+      <div><h2>Risk explorer &amp; migration workbench</h2>
+        <div class="muted small provenance-legend">
+          <span class="prov observed">observed</span> read from repo or metadata
+          <span class="prov executed">executed</span> produced by running it
+          <span class="prov ai_generated">AI · Gemma</span> validated model output
+          <span class="prov rule_based">rule</span> deterministic fallback</div></div>
+    </div>
+    <div class="table-wrap"><table id="deps-table" class="data"><thead><tr>
+      <th class="w-check"></th><th>Dependency</th><th>Risk</th><th>Indicators</th><th>Plan</th><th>Status</th></tr></thead>
+      <tbody></tbody></table></div>
+    <div class="action-bar">
+      <button id="exec-btn" class="primary" disabled>Select planned dependencies</button>
+      <span class="muted small">Each exit runs in its own working copy. The analysed repository is never changed.</span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="combined-card">
+    <div class="card-head"><h2>Combined migration <span class="prov executed">executed</span></h2></div>
+    <div id="combined"></div>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer hidden" aria-label="Dependency details">
+  <div class="drawer-head">
+    <div><div class="muted small">Dependency Exit Capsule</div><h2 id="detail-title"></h2></div>
+    <button class="icon-btn" id="detail-close" aria-label="Close">✕</button>
+  </div>
+  <nav class="tabs" id="tabs"></nav>
+  <div id="detail-body" class="drawer-body"></div>
+</aside>
+<div id="scrim" class="scrim hidden"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -12,17 +12,48 @@ from pathlib import Path
 
 from packaging.utils import canonicalize_name
 
-from . import TOOL_NAME, __version__, ai, capsule, manifests, metadata, risk, sandbox, usage
+from . import TOOL_NAME, __version__, ai, capsule, manifests, metadata, risk, sandbox, usage, verification
 from .compare import compare_probes, compare_tests, compare_warnings, failure_feedback, unified_diff
 from .llm import LLM, LLMConfig, LLMError
 from .util import HttpCache, log, run, write_json
+
+EXECUTION_BOUNDARY = {
+    "kind": "host-process",
+    "os_isolation": False,
+    "detail": ("Repository code (install hooks, tests, probes) runs as child processes of this tool "
+               "inside per-run working copies, with a scrubbed environment (no API keys/tokens), "
+               "HOME/TMP redirected into the work directory and timeouts. Python virtual "
+               "environments are NOT a security boundary: the code can still read files and use "
+               "the network as your user. Analyse only repositories you trust, or run depexit "
+               "itself inside a disposable VM/container."),
+}
+
+
+class PipelineError(RuntimeError):
+    pass
+
+
+def validate_target(target: str) -> str:
+    """Accept https/ssh git URLs or an existing local directory; nothing else."""
+    t = (target or "").strip()
+    if not t or t.startswith("-"):
+        raise PipelineError("target must be a repository URL or a local directory")
+    if "://" in t:
+        if not t.startswith("https://"):
+            raise PipelineError("only https:// repository URLs are supported")
+        return t
+    if t.startswith("git@"):
+        return t
+    if not Path(t).is_dir():
+        raise PipelineError(f"target not found: {t}")
+    return t
 
 
 class Pipeline:
     def __init__(self, target: str, out: Path, pythons: list[str], llm_cfg: LLMConfig | None,
                  only: list[str] | None = None, jobs: int = 4, max_fix_attempts: int = 2,
-                 include_low: bool = False):
-        self.target = target
+                 include_low: bool = False, on_event=None):
+        self.target = validate_target(target)
         self.out = out.resolve()
         self.pythons = pythons
         self.only = {canonicalize_name(o) for o in only} if only else None
@@ -34,6 +65,27 @@ class Pipeline:
         self.llm = LLM(llm_cfg, self.out / "llm_calls") if llm_cfg else None
         self.llm_status = None
         self.lock = threading.Lock()
+        self.events: list[dict] = []
+        self.on_event = on_event
+        self.results: dict = {}
+        self.combined_result = None
+        self.stage = "created"
+        self.started = time.monotonic()
+
+    def say(self, msg: str, stage: str | None = None, dep: str | None = None) -> None:
+        """Log a real progress event (CLI stderr + optional listener, e.g. the web UI)."""
+        if stage:
+            self.stage = stage
+        log(msg)
+        ev = {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "stage": self.stage,
+              "dep": dep, "msg": msg}
+        with self.lock:
+            self.events.append(ev)
+        if self.on_event:
+            try:
+                self.on_event(ev)
+            except Exception:  # a broken listener must never break the analysis
+                pass
 
     # ------------------------------------------------------------------ repo
     def resolve_repo(self) -> Path:
@@ -43,13 +95,14 @@ class Pipeline:
             if dst.exists():
                 shutil.rmtree(dst)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            r = run(["git", "clone", "--depth", "1", t, str(dst)], timeout=600)
+            r = run(["git", "clone", "--depth", "1", "--no-recurse-submodules", "--", t, str(dst)],
+                    timeout=600, untrusted=True)
             if not r.ok:
-                raise SystemExit(f"git clone failed:\n{r.stderr}")
+                raise PipelineError(f"git clone failed:\n{r.stderr.strip()}")
             return dst
         p = Path(t).resolve()
         if not p.is_dir():
-            raise SystemExit(f"target not found: {t}")
+            raise PipelineError(f"target not found: {t}")
         return p
 
     @staticmethod
@@ -59,15 +112,24 @@ class Pipeline:
 
     # ------------------------------------------------------------------ main
     def execute(self) -> Path:
-        started = time.monotonic()
+        """Full run (CLI): analyse, plan, migrate + verify every at-risk dependency, combine."""
+        self.analyze()
+        self.plan_all()
+        self.run_exits()
+        return self.finalize()
+
+    def analyze(self) -> None:
+        """Inspect + baseline + risk. Nothing in the repository is modified."""
+        self.started = time.monotonic()
         self.out.mkdir(parents=True, exist_ok=True)
+        self.say(f"cloning / locating {self.target}", stage="inspect")
         repo = self.resolve_repo()
         self.repo = repo
-        log(f"target: {repo}")
+        self.say(f"target: {repo}")
         if self.llm:
             ok, msg = self.llm.ping()
             self.llm_status = {"reachable": ok, "detail": msg, **self.llm.cfg.public()}
-            log(f"Gemma endpoint {'reachable' if ok else 'NOT reachable: ' + msg}")
+            self.say(f"Gemma endpoint {'reachable' if ok else 'NOT reachable: ' + msg}")
             if not ok:
                 self.llm = None
 
@@ -75,9 +137,12 @@ class Pipeline:
         decls = manifests.collect(repo)
         drift = manifests.find_drift(decls)
         sites, parse_errors = usage.scan_python(repo)
-        log(f"manifests: {len(decls)} declarations, usage sites: {len(sites)}")
+        self.drift, self.parse_errors = drift, parse_errors
+        self.say(f"manifests: {len(decls)} declarations, usage sites: {len(sites)}")
 
         # 2. baseline execution on every Python ---------------------------
+        self.say(f"baseline: installing and testing the unmodified repo on Python {', '.join(self.pythons)}",
+                 stage="baseline")
         self.baselines = {}
         with ThreadPoolExecutor(max_workers=len(self.pythons)) as ex:
             for py, b in zip(self.pythons, ex.map(lambda p: self.baseline(repo, p), self.pythons)):
@@ -95,7 +160,8 @@ class Pipeline:
         self.stdlib = {py: set(b["env"].pkgmap.get("stdlib", [])) for py, b in self.baselines.items()}
 
         # 3. assemble per-dependency facts --------------------------------
-        project_name = self._project_name(repo)
+        self.say("risk: import checks, PyPI/GitHub metadata, attribution", stage="risk")
+        project_name = self.project_name = self._project_name(repo)
         deps: dict[str, risk.DepFacts] = {}
 
         def get(name):
@@ -167,43 +233,66 @@ class Pipeline:
                                   usage_by_loc=usage_by_loc, imported_dists=imported,
                                   required_by=required_by)
 
-        ranked = sorted(deps.values(), key=lambda d: -d.score)
-        selected = [d for d in ranked if (d.at_risk or (self.include_low and d.indicators))
-                    and (self.only is None or d.name in self.only)]
-        log("at-risk: " + ", ".join(f"{d.name}({d.max_severity})" for d in selected))
+        self.deps = deps
+        self.ranked = sorted(deps.values(), key=lambda d: -d.score)
+        self.selected = [d for d in self.ranked if (d.at_risk or (self.include_low and d.indicators))
+                         and (self.only is None or d.name in self.only)]
+        self.say("at-risk: " + (", ".join(f"{d.name}({d.max_severity})" for d in self.selected) or "none"))
 
-        # 4. per-dependency exit: propose, migrate, verify ----------------
-        results = {}
+    def _parallel(self, fn, deps: list) -> None:
         with ThreadPoolExecutor(max_workers=max(1, self.jobs)) as ex:
-            futs = {d.name: ex.submit(self.exit_dependency, d) for d in selected}
+            futs = {d.name: ex.submit(fn, d) for d in deps}
             for name, f in futs.items():
                 try:
-                    results[name] = f.result()
+                    self.results[name] = f.result()
                 except Exception as exc:  # keep going; record the failure honestly
-                    log(f"{name}: pipeline error {exc!r}")
-                    results[name] = {"status": "tool_error", "error": repr(exc)}
+                    self.say(f"{name}: pipeline error {exc!r}", dep=name)
+                    self.results[name] = {**self.results.get(name, {}), "status": "tool_error",
+                                          "error": repr(exc)}
 
-        # 5. combined migration of every verified exit --------------------
-        combined = self.combined(repo, selected, results)
+    def plan_all(self, names: list[str] | None = None) -> None:
+        """Propose + validate a migration plan per dependency. No code is modified."""
+        self.say("planning: usage review, proposal, API mapping, verification requirements", stage="plan")
+        deps = [d for d in self.selected if names is None or d.name in names]
+        self._parallel(self.propose, deps)
+        self.write_outputs()
 
-        # 6. write capsules -----------------------------------------------
-        run_meta = {
+    def run_exits(self, names: list[str] | None = None) -> None:
+        """Migrate + verify planned dependencies, each in its own working copy."""
+        self.say("migrate + verify in isolated working copies", stage="verify")
+        deps = [d for d in self.selected if (names is None or d.name in names)
+                and self.results.get(d.name, {}).get("status") == "planned"]
+        self._parallel(lambda d: self.exit_dependency(d, self.results[d.name]), deps)
+
+    def finalize(self) -> Path:
+        """Combine every verified exit, re-verify together, write capsules."""
+        self.say("combining every verified exit and re-verifying", stage="combine")
+        self.combined_result = self.combined(self.repo, self.selected, self.results)
+        self.write_outputs()
+        self.say(f"done -> {self.out}", stage="done")
+        return self.out
+
+    def run_meta(self) -> dict:
+        return {
             "tool": {"name": TOOL_NAME, "version": __version__},
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "target": {"source": self.target, "commit": self.commit_of(repo),
-                       "pythons": self.pythons, "project": project_name},
+            "stage": self.stage,
+            "target": {"source": self.target, "commit": self.commit_of(self.repo),
+                       "pythons": self.pythons, "project": self.project_name},
             "ai": self.llm_status or {"reachable": False, "detail": "no model configured (--no-llm)"},
+            "execution_boundary": EXECUTION_BOUNDARY,
             "baseline": {py: {"env": b["env"].summary(), "tests": b["tests"].to_dict()}
                          for py, b in self.baselines.items()},
-            "manifest_drift": drift,
-            "parse_errors": parse_errors,
-            "seconds": round(time.monotonic() - started, 1),
-            "_repo": str(repo),
-            "_modules": modules,
+            "manifest_drift": self.drift,
+            "parse_errors": self.parse_errors,
+            "seconds": round(time.monotonic() - self.started, 1),
+            "_repo": str(self.repo),
+            "_modules": self.modules,
         }
-        capsule.write_all(self.out, run_meta, ranked, selected, results, combined)
-        log(f"done in {run_meta['seconds']}s -> {self.out}")
-        return self.out
+
+    def write_outputs(self) -> None:
+        capsule.write_all(self.out, self.run_meta(), self.ranked, self.selected, self.results,
+                          self.combined_result)
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -220,10 +309,10 @@ class Pipeline:
         base = self.work / f"baseline-py{py}"
         rcopy = sandbox.copy_repo(repo, base / "repo")
         env = sandbox.create_env(rcopy, base / "venv", py)
-        log(f"baseline py{py}: install {'ok' if env.ok else 'FAILED'}")
+        self.say(f"baseline py{py}: install {'ok' if env.ok else 'FAILED'}")
         tests = sandbox.run_tests(env, rcopy, base / "results")
         c = tests.counts()
-        log(f"baseline py{py}: {c['passed']} passed, {c['failed']} failed, {c['error']} errors"
+        self.say(f"baseline py{py}: {c['passed']} passed, {c['failed']} failed, {c['error']} errors"
             + (" (collection error)" if tests.collection_error else ""))
         return {"env": env, "repo": rcopy, "tests": tests, "imports": {}, "dir": base}
 
@@ -234,14 +323,28 @@ class Pipeline:
         return {f: (root / f).read_text(encoding="utf-8") for f in files if (root / f).is_file()}
 
     # ------------------------------------------------------------------ one dependency
-    def exit_dependency(self, dep: risk.DepFacts) -> dict:
+    def _allowed_new_imports(self, plan: dict) -> set[str]:
+        """Modules a migration may newly import: stdlib, repo-local, already installed, planned."""
+        allowed = set().union(*self.stdlib.values()) | {"__future__"}
+        allowed |= usage.local_top_level_names(self.repo)
+        allowed |= set(self.modules)
+        if plan.get("package"):
+            pkg = canonicalize_name(plan["package"])
+            allowed |= {pkg.replace("-", "_"), plan["package"].replace("-", "_")}
+            allowed |= {m for m, ds in self.modules.items() if pkg in ds}
+        if plan.get("stdlib_module"):
+            allowed.add(plan["stdlib_module"].split(".")[0])
+        return allowed
+
+    def propose(self, dep: risk.DepFacts) -> dict:
+        """Stage 1 of an exit: usage review, plan, API mapping, requirements, probes."""
         name = dep.name
-        dwork = self.work / "deps" / name
         res: dict = {"llm_calls": [], "validation": [], "attempts": [],
                      "_baseline_msgs": {py: {n: t["message"] for n, t in b["tests"].tests.items()}
                                         for py, b in self.baselines.items()}}
         usage_files = self._usage_files(dep)
         orig_texts = self._texts(self.repo, usage_files)
+        self.say(f"{name}: proposing ({len(dep.usage)} usage sites in {len(usage_files)} files)", dep=name)
 
         # --- proposal ------------------------------------------------------
         plan, provenance = None, "rule_based"
@@ -252,9 +355,9 @@ class Pipeline:
                 checks = ai.validate_plan(plan, dep, self.http, self.pythons, self.stdlib)
                 res["validation"] += checks
                 provenance = "ai_generated"
-                if not all(c["ok"] for c in checks):
+                if not ai.plan_accepted(checks):
                     res["rejected_ai_plan"] = plan
-                    log(f"{name}: Gemma proposal failed validation, falling back to rules")
+                    self.say(f"{name}: Gemma proposal failed validation, falling back to rules", dep=name)
                     plan, provenance = None, "rule_based"
             except LLMError as exc:
                 res["llm_error"] = str(exc)
@@ -264,8 +367,17 @@ class Pipeline:
                 if plan["action"] != "keep" else []
         plan["provenance"] = provenance
         res["plan"] = plan
-        log(f"{name}: plan = {plan['action']} {plan.get('package') or plan.get('stdlib_module') or ''}"
-            f"{plan.get('specifier') or ''} ({provenance})")
+        res["api_mapping_review"] = ai.review_api_mapping(plan, dep)
+        unc = [c for c in res["validation"] if not c["ok"] and not c.get("blocking", True)]
+        res["uncertainties"] = [{"provenance": "observed", "text": f"{c['check']}: {c.get('detail')}"}
+                                for c in unc]
+        if not self.llm and plan["action"] in {"replace", "stdlib"}:
+            res["uncertainties"].append({"provenance": "observed",
+                                         "text": "Code rewrite needs Gemma, which is unavailable"})
+        code_expected = bool(self.llm and plan.get("needs_code_changes") and orig_texts)
+        res["verification_requirements"] = verification.requirements_for(plan, self.pythons, code_expected)
+        self.say(f"{name}: plan = {plan['action']} {plan.get('package') or plan.get('stdlib_module') or ''}"
+                 f"{plan.get('specifier') or ''} ({provenance})", dep=name)
         if plan["action"] == "keep":
             res["status"] = "not_executed"
             res["status_reason"] = "No safe replacement proposed"
@@ -281,11 +393,28 @@ class Pipeline:
             except LLMError as exc:
                 res["probe_error"] = str(exc)
         res["probe_code"] = probe_code
+        res["status"] = "planned"
+        res["status_reason"] = "Plan ready for review; no code has been modified yet"
+        return res
+
+    def exit_dependency(self, dep: risk.DepFacts, res: dict | None = None) -> dict:
+        """Stage 2 of an exit: migrate in a working copy, verify, fix loop, AI review."""
+        if res is None:
+            res = self.propose(dep)
+            if res.get("status") != "planned":
+                return res
+        name = dep.name
+        dwork = self.work / "deps" / name
+        plan = res["plan"]
+        usage_files = self._usage_files(dep)
+        orig_texts = self._texts(self.repo, usage_files)
+        res["attempts"] = []
         probe_file = None
-        if probe_code:
+        if res.get("probe_code"):
             probe_file = dwork / "probes.py"
             probe_file.parent.mkdir(parents=True, exist_ok=True)
-            probe_file.write_text(probe_code, encoding="utf-8")
+            probe_file.write_text(res["probe_code"], encoding="utf-8")
+        self.say(f"{name}: migrating in a working copy", dep=name)
 
         # --- migrate + verify, with a bounded fix loop ---------------------
         feedback = None
@@ -295,6 +424,7 @@ class Pipeline:
                                 probe_file, feedback, res)
             res["attempts"].append(att["summary"])
             best = att
+            self.say(f"{name}: attempt {attempt}: {att['evaluation']['status']}", dep=name)
             if att["clean"] or not self.llm or attempt >= self.max_fix:
                 break
             feedback = failure_feedback(att["comparison"], self.modules, att["residual"])
@@ -302,9 +432,14 @@ class Pipeline:
                 break
             # a manifest-only change broke something: let Gemma adapt the code next time
             plan["needs_code_changes"] = True
-            log(f"{name}: attempt {attempt} not clean, asking Gemma to fix ({len(feedback)} chars of evidence)")
+            self.say(f"{name}: attempt {attempt} not clean, asking Gemma to fix "
+                     f"({len(feedback)} chars of evidence)", dep=name)
         res.update({k: best[k] for k in ("comparison", "edits", "manifest_files", "patch", "repo", "residual")})
-        res["status"] = self._status(best)
+        res["verification"] = best["evaluation"]
+        res["status"] = best["evaluation"]["status"]
+        res["status_reason"] = "; ".join(
+            f"{r['id']}: {r['result']}" for r in best["evaluation"]["requirements"]
+            if r["result"] != verification.MET and r["required"]) or None
 
         # --- AI review of executed results ---------------------------------
         if self.llm:
@@ -312,7 +447,7 @@ class Pipeline:
             if rv:
                 res["llm_calls"].append(rv.pop("_meta"))
                 res["review"] = rv
-        log(f"{name}: {res['status']}")
+        self.say(f"{name}: {res['status']}", dep=name)
         return res
 
     def _attempt(self, dep, plan, adir: Path, orig_texts, usage_files, probe_file, feedback, res) -> dict:
@@ -326,7 +461,8 @@ class Pipeline:
         edits, checks = {}, []
         if self.llm and plan.get("needs_code_changes") and orig_texts:
             try:
-                edits, checks, meta = ai.ai_migration(self.llm, dep, plan, orig_texts, rcopy, feedback)
+                edits, checks, meta = ai.ai_migration(self.llm, dep, plan, orig_texts, rcopy, feedback,
+                                                      self._allowed_new_imports(plan))
                 res["llm_calls"].append(meta)
             except LLMError as exc:
                 checks = [{"check": "Gemma produced a migration", "ok": False, "detail": str(exc),
@@ -350,13 +486,12 @@ class Pipeline:
                     lambda p: self._verify(dep, plan, rcopy, adir / f"py{p}", p, probe_file),
                     self.pythons)):
                 comparison[py] = c
-        clean = all(c["install_ok"] and not c["tests"]["regressed"]
-                    and not (c["tests"]["replacement_collection_error"]
-                             and not c["tests"]["original_collection_error"])
-                    and not (c.get("probes") or {}).get("different")
-                    for c in comparison.values()) and not any(r["kind"] != "tooling" for r in residual)
+        code_expected = bool(edits) or bool(self.llm and plan.get("needs_code_changes") and orig_texts)
+        reqs = verification.requirements_for(plan, self.pythons, code_expected)
+        evaluation = verification.evaluate(plan, reqs, comparison, residual)
+        clean = verification.is_clean(evaluation)
         summary = {"dir": str(adir.relative_to(self.out)), "feedback_given": bool(feedback),
-                   "edited_files": sorted(edits), "clean": clean,
+                   "edited_files": sorted(edits), "clean": clean, "status": evaluation["status"],
                    "per_python": {py: {"install_ok": c["install_ok"],
                                        "tests": c["tests"]["replacement"],
                                        "regressed": len(c["tests"]["regressed"]),
@@ -364,7 +499,8 @@ class Pipeline:
                                   for py, c in comparison.items()}}
         summary["residual_usage"] = len(residual)
         return {"comparison": comparison, "edits": edits, "manifest_files": manifest_files,
-                "patch": patch, "repo": rcopy, "clean": clean, "summary": summary, "residual": residual}
+                "patch": patch, "repo": rcopy, "clean": clean, "summary": summary, "residual": residual,
+                "evaluation": evaluation}
 
     def _verify(self, dep, plan, rcopy: Path, vdir: Path, py: str, probe_file) -> dict:
         b = self.baselines[py]
@@ -413,21 +549,12 @@ class Pipeline:
                      "probe_diffs": (v.get("probes") or {}).get("different", [])[:10]}
         return c
 
-    @staticmethod
-    def _status(att) -> str:
-        cmp = att["comparison"]
-        if not all(c["install_ok"] for c in cmp.values()):
-            return "failed"
-        if any(c["tests"]["regressed"] or (c["tests"]["replacement_collection_error"]
-               and not c["tests"]["original_collection_error"]) for c in cmp.values()):
-            return "failed"
-        gaps = any((c.get("probes") or {}).get("different") or (c.get("warnings") or {}).get("new")
-                   for c in cmp.values()) or bool(att.get("residual"))
-        return "verified_with_gaps" if gaps else "verified"
-
     # ------------------------------------------------------------------ combined
     def combined(self, repo: Path, selected, results) -> dict | None:
         ok = [d for d in selected if results.get(d.name, {}).get("status") in ("verified", "verified_with_gaps")]
+        excluded = [{"dependency": d.name, "status": results[d.name].get("status")} for d in selected
+                    if d not in ok and results.get(d.name, {}).get("status")
+                    not in (None, "not_executed", "planned")]
         if not ok:
             return None
         cdir = self.work / "combined"
@@ -492,7 +619,18 @@ class Pipeline:
             t = sandbox.run_tests(env, rcopy, cdir / f"py{py}" / "results")
             comparison[py] = {"install_ok": True, "tests": compare_tests(self.baselines[py]["tests"], t),
                               "warnings": compare_warnings(self.baselines[py]["tests"].warnings, t.warnings)}
-        log("combined: " + ", ".join(f"py{py} {c.get('tests', {}).get('replacement')}" for py, c in comparison.items()))
+        self.say("combined: " + ", ".join(f"py{py} {c.get('tests', {}).get('replacement')}"
+                                          for py, c in comparison.items()))
+        # observed re-scan of the combined tree for every dependency that should be gone
+        residual_by_dep = {}
+        sites, _ = usage.scan_python(rcopy)
+        for dep in ok:
+            if dep.name in applied and results[dep.name]["plan"]["action"] in verification.REMOVES_ORIGINAL:
+                residual_by_dep[dep.name] = [s.to_dict() for s in sites if s.module in dep.modules]
+        ev = verification.evaluate_combined(applied, skipped, comparison, residual_by_dep)
+        self.say(f"combined: {ev['status']}")
         return {"dependencies": applied, "merged_edits": merged, "conflicts": conflicts,
-                "rebased_by_ai": rebased, "skipped": skipped, "comparison": comparison, "patch": unified_diff(repo, rcopy, sorted(files)),
-                "repo": rcopy}
+                "rebased_by_ai": rebased, "skipped": skipped, "excluded_unverified": excluded,
+                "comparison": comparison, "residual": residual_by_dep,
+                "status": ev["status"], "verification": ev,
+                "patch": unified_diff(repo, rcopy, sorted(files)), "repo": rcopy}

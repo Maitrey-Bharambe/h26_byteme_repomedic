@@ -33,11 +33,16 @@ class LLMConfig:
     model: str = field(default_factory=lambda: os.environ.get("DEPEXIT_LLM_MODEL", DEFAULT_MODEL))
     api_key: str | None = field(default_factory=lambda: os.environ.get("DEPEXIT_LLM_API_KEY"))
     temperature: float = 0.1
-    timeout: int = 300
+    timeout: int = field(default_factory=lambda: int(os.environ.get("DEPEXIT_LLM_TIMEOUT", "900")))
     max_tokens: int = 8192
+    # Ollama only: its OpenAI-compatible endpoint silently truncates prompts to the
+    # server default context (often 4096 tokens), so Ollama is driven via /api/chat.
+    num_ctx: int = field(default_factory=lambda: int(os.environ.get("DEPEXIT_LLM_NUM_CTX", "8192")))
+    think: bool = False
 
     def public(self):
-        return {"base_url": self.base_url, "model": self.model, "temperature": self.temperature}
+        return {"base_url": self.base_url, "model": self.model, "temperature": self.temperature,
+                "num_ctx": self.num_ctx}
 
 
 class LLMError(RuntimeError):
@@ -51,6 +56,48 @@ class LLM:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._n = 0
         self._lock = threading.Lock()
+        self._ollama: bool | None = None
+
+    def is_ollama(self) -> bool:
+        """Detect an Ollama server (GET /api/version) so the native API can be used."""
+        if self._ollama is None:
+            root = re.sub(r"/v1/?$", "", self.cfg.base_url.rstrip("/"))
+            try:
+                with urllib.request.urlopen(root + "/api/version", timeout=5) as resp:
+                    self._ollama = "version" in json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                self._ollama = False
+        return self._ollama
+
+    def _request(self, messages) -> tuple[str, str, dict | None]:
+        """One completion. Returns (content, model, usage)."""
+        headers = {"Content-Type": "application/json"}
+        if self.cfg.api_key:
+            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
+        if self.is_ollama():
+            root = re.sub(r"/v1/?$", "", self.cfg.base_url.rstrip("/"))
+            url = root + "/api/chat"
+            payload = {"model": self.cfg.model, "messages": messages, "stream": False,
+                       "think": self.cfg.think,
+                       "options": {"temperature": self.cfg.temperature, "num_ctx": self.cfg.num_ctx,
+                                   "num_predict": min(self.cfg.max_tokens, self.cfg.num_ctx // 2)}}
+        else:
+            url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+            payload = {"model": self.cfg.model, "messages": messages,
+                       "temperature": self.cfg.temperature, "max_tokens": self.cfg.max_tokens}
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+        with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        if "message" in body and "choices" not in body:  # Ollama native
+            usage = {"prompt_tokens": body.get("prompt_eval_count"),
+                     "completion_tokens": body.get("eval_count"), "num_ctx": self.cfg.num_ctx,
+                     "done_reason": body.get("done_reason")}
+            if (usage["prompt_tokens"] or 0) >= self.cfg.num_ctx - 8:
+                raise LLMError(f"prompt filled the whole {self.cfg.num_ctx}-token context window "
+                               "and was truncated; raise DEPEXIT_LLM_NUM_CTX")
+            return body["message"].get("content") or "", body.get("model", self.cfg.model), usage
+        return (body["choices"][0]["message"].get("content") or "", body.get("model", self.cfg.model),
+                body.get("usage"))
 
     def ping(self) -> tuple[bool, str]:
         try:
@@ -66,19 +113,11 @@ class LLM:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        payload = {"model": self.cfg.model, "messages": messages,
-                   "temperature": self.cfg.temperature, "max_tokens": self.cfg.max_tokens}
-        headers = {"Content-Type": "application/json"}
-        if self.cfg.api_key:
-            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
-        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         started = time.monotonic()
         last_err = None
         for attempt in range(3):
-            req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
-                    body = json.loads(resp.read().decode("utf-8"))
+                content, model, usage = self._request(messages)
                 break
             except urllib.error.HTTPError as exc:
                 last_err = f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:300]}"
@@ -89,14 +128,14 @@ class LLM:
             time.sleep(2 * (attempt + 1))
         else:
             raise LLMError(last_err or "LLM request failed")
-        content = body["choices"][0]["message"].get("content") or ""
         record = {
             "purpose": purpose,
-            "model": body.get("model", self.cfg.model),
+            "model": model,
             "base_url": self.cfg.base_url,
+            "api": "ollama-native" if self._ollama else "openai-compatible",
             "prompt_sha256": sha256(prompt),
             "seconds": round(time.monotonic() - started, 2),
-            "usage": body.get("usage"),
+            "usage": usage,
             "prompt": prompt,
             "response": content,
         }

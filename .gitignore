@@ -1,4 +1,25 @@
+# Python
 .venv/
+venv/
 __pycache__/
+*.py[cod]
 *.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# depexit outputs (contain cloned repos, logs and model transcripts)
 depexit-out/
+depexit-out*/
+depexit-runs/
+
+# local secrets / editor
+.env
+.env.*
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

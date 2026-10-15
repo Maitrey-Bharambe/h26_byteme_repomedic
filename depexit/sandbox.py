@@ -20,6 +20,14 @@ COPY_IGNORE = shutil.ignore_patterns(".git", ".venv", "venv", "__pycache__", ".p
                                      "*.pyc", ".depexit", ".tox")
 
 
+def _home(base: Path) -> dict:
+    """Redirect HOME/temp/cache of untrusted code into its own work directory."""
+    h = Path(base) / "home"
+    (h / "tmp").mkdir(parents=True, exist_ok=True)
+    return {"HOME": str(h), "USERPROFILE": str(h), "TMP": str(h / "tmp"), "TEMP": str(h / "tmp"),
+            "TMPDIR": str(h / "tmp"), "XDG_CACHE_HOME": str(h / "cache")}
+
+
 def copy_repo(src: Path, dst: Path) -> Path:
     if dst.exists():
         shutil.rmtree(dst)
@@ -77,14 +85,14 @@ def create_env(repo: Path, env_dir: Path, python: str) -> Env:
             cmd = [uv, "pip", "install", "--python", str(py), *args]
         else:
             cmd = [str(py), "-m", "pip", "install", "-q", *args]
-        r = run(cmd, cwd=repo, timeout=900)
+        r = run(cmd, cwd=repo, timeout=900, untrusted=True, env=_home(env_dir))
         cmds.append(cmd)
         logs.append(r.text())
         if not r.ok:
             ok = False
             break
     env = Env(python, env_dir, py, ok, "\n".join(logs), cmds)
-    r = run([str(py), str(HELPERS / "pkgmap.py")], timeout=120)
+    r = run([str(py), "-I", str(HELPERS / "pkgmap.py")], timeout=120, untrusted=True, env=_home(env_dir))
     try:
         env.pkgmap = json.loads(r.stdout)
     except ValueError:
@@ -96,6 +104,7 @@ def create_env(repo: Path, env_dir: Path, python: str) -> Env:
 
 @dataclass
 class TestRun:
+    __test__ = False  # not a pytest test class
     exit_code: int
     seconds: float
     tests: dict[str, dict]          # nodeid -> {outcome, message}
@@ -150,7 +159,8 @@ def run_tests(env: Env, repo: Path, out_dir: Path) -> TestRun:
     pythonpath = os.pathsep.join([str(HELPERS), str(repo)])
     r: RunResult = run(cmd, cwd=repo, env={"PYTHONPATH": pythonpath,
                                            "DEPEXIT_WARNINGS_OUT": str(warn_out),
-                                           "PYTHONDONTWRITEBYTECODE": "1"}, timeout=1200)
+                                           "PYTHONDONTWRITEBYTECODE": "1", **_home(out_dir)},
+                       timeout=1200, untrusted=True)
     tests = _parse_junit(junit)
     collection_error = None
     if r.returncode in (2, 3, 4) or (not tests and r.returncode != 5):
@@ -166,7 +176,8 @@ def run_tests(env: Env, repo: Path, out_dir: Path) -> TestRun:
 # --------------------------------------------------------------------------- imports
 
 def import_check(env: Env, repo: Path, module: str) -> dict:
-    r = run([str(env.python), "-I", str(HELPERS / "import_check.py"), module], cwd=repo, timeout=120)
+    r = run([str(env.python), "-I", str(HELPERS / "import_check.py"), module], cwd=repo, timeout=120,
+            untrusted=True, env=_home(env.dir))
     try:
         return json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -179,12 +190,10 @@ def import_check(env: Env, repo: Path, module: str) -> dict:
 def run_probes(env: Env, repo: Path, probe_file: Path, out_file: Path) -> dict:
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.unlink(missing_ok=True)
-    (out_file.parent / "probe_home").mkdir(parents=True, exist_ok=True)
     r = run([str(env.python), str(HELPERS / "probe_runner.py"), str(probe_file), str(out_file)],
             cwd=repo, env={"PYTHONPATH": str(repo), "PYTHONDONTWRITEBYTECODE": "1",
-                           "XDG_CACHE_HOME": str(out_file.parent / "probe_home" / "cache"),
-                           "HOME": str(out_file.parent / "probe_home")},
-            timeout=180)
+                           **_home(out_file.parent / "probe_home")},
+            timeout=180, untrusted=True)
     data = read_json(out_file)
     if data is None:
         data = {"__runner__": {"ok": False, "error": (r.stderr or r.stdout)[-1500:] or

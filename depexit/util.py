@@ -37,19 +37,53 @@ class RunResult:
         return f"$ {' '.join(self.cmd)}\n[exit {self.returncode} in {self.seconds:.1f}s]\n{self.stdout}\n{self.stderr}"
 
 
+# Variables passed through to untrusted repository code (installs, tests, probes).
+# Everything else -- API keys, tokens, cloud credentials, DEPEXIT_LLM_* -- is dropped.
+SAFE_ENV_KEYS = {
+    "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS", "OS", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
+    "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "PIP_INDEX_URL",
+    "PIP_CACHE_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+}
+SECRET_RE = None
+
+
+def safe_env(extra: dict | None = None) -> dict:
+    """Minimal environment for executing code we do not trust."""
+    import re
+    global SECRET_RE
+    SECRET_RE = SECRET_RE or re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION", re.I)
+    env = {k: v for k, v in os.environ.items()
+           if k in SAFE_ENV_KEYS and not SECRET_RE.search(k)}
+    for proxy in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        if "@" in env.get(proxy, ""):
+            env.pop(proxy)  # proxy URL with embedded credentials
+    env.update({"PYTHONNOUSERSITE": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "GIT_TERMINAL_PROMPT": "0"})
+    if extra:
+        env.update(extra)
+    return env
+
+
 def run(cmd: list[str], cwd: str | Path | None = None, env: dict | None = None,
-        timeout: int = 900) -> RunResult:
+        timeout: int = 900, untrusted: bool = False) -> RunResult:
+    """Run a command. `untrusted=True` (repository code) gets only `safe_env()`."""
     started = time.monotonic()
-    full_env = os.environ.copy()
-    if env:
-        full_env.update(env)
+    if untrusted:
+        full_env = safe_env(env)
+    else:
+        full_env = os.environ.copy()
+        if env:
+            full_env.update(env)
     try:
         p = subprocess.run(cmd, cwd=cwd, env=full_env, capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout, encoding="utf-8", errors="replace")
         return RunResult(cmd, p.returncode, p.stdout, p.stderr, time.monotonic() - started)
     except subprocess.TimeoutExpired as exc:
-        return RunResult(cmd, -9, exc.stdout or "" if isinstance(exc.stdout, str) else "",
-                         f"TIMEOUT after {timeout}s", time.monotonic() - started)
+        out = exc.stdout if isinstance(exc.stdout, str) else ""
+        return RunResult(cmd, -9, out, f"TIMEOUT after {timeout}s", time.monotonic() - started)
     except FileNotFoundError as exc:
         return RunResult(cmd, -1, "", str(exc), time.monotonic() - started)
 
@@ -85,12 +119,19 @@ class HttpCache:
             if cached is not None:
                 return cached.get("status"), cached.get("body")
         req = urllib.request.Request(url, headers={"User-Agent": "depexit/0.1", **(headers or {})})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                status, body = resp.status, json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            status, body = exc.code, None
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
-            return None, {"error": str(exc)}
+        for attempt in range(3):  # transient DNS/network errors must not silently hide risks
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    status, body = resp.status, json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                status, body = exc.code, None
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                    break
+            except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+                if attempt == 2:
+                    log(f"metadata fetch failed: {url}: {exc}")
+                    return None, {"error": str(exc)}
+            time.sleep(1.5 * (attempt + 1))
         write_json(key, {"url": url, "status": status, "body": body})
         return status, body
