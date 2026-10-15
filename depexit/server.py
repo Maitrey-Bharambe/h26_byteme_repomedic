@@ -180,6 +180,13 @@ def create_app(runs_dir: Path, pipeline_factory=Pipeline) -> Flask:
     def static_files(name):
         return send_from_directory(WEB, name)
 
+    @app.after_request
+    def _no_stale_ui(resp):
+        # the UI changes with the code; never let a browser keep an old app.js/style.css
+        if request.path == "/" or request.path.startswith("/static/") or request.path.startswith("/api/"):
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
+
     # ------------------------------------------------------------------ API
     @app.get("/api/llm")
     def api_llm():

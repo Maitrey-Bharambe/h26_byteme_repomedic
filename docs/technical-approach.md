@@ -473,8 +473,19 @@ execution evidence. The combined migration of six exits passed 10/10 on both Pyt
 A scoped Gemma run with the new checks (chardet, appdirs, toml, setuptools) reproduced the
 blindness results (toml and chardet watched, appdirs and setuptools not exercised). Gemma
 proposed setuptools `>=78.1.1,<84` (which keeps `pkg_resources`), toml → `tomli`,
-appdirs → `platformdirs` and chardet `>=7.6.0`. Its verification was still running when
-this document was written.
+appdirs → `platformdirs` and chardet `>=7.6.0` (44 min 40 s in total). Verdicts:
+
+- **chardet: failed.** Replay found the cp1252 difference. Gemma's fix loop rewrote the code
+  twice using the replay evidence and got closer (`ISO-8859-1` → `iso-8859-1`), but the value
+  still differs, so it stays failed.
+- **toml → tomli: incomplete.** Attempt 0 failed; after Gemma's fix, 1 recorded call replays
+  identically and tests pass, but the required behaviour probes could not run.
+- **appdirs → platformdirs: incomplete.** Its only recorded call was not replayable.
+- **setuptools: incomplete.** The code was rewritten, but no recorded call and no valid probe
+  exists to prove behaviour.
+
+None of these was reported as verified, which is the intended behaviour when the evidence
+is missing or contradicts the migration.
 
 ## 18. Limitations and future work
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RepoMedic Workbench</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
 <header class="top">
@@ -44,6 +44,7 @@
         <div class="opt-group"><span class="opt-label">Options</span>
           <label class="toggle"><input type="checkbox" id="include-low"><span>low-risk too</span></label>
           <label class="inline-num">fix attempts <input type="number" id="fix" min="0" max="3" value="2"></label>
+          <label class="inline-num">only <input type="text" id="only" class="only-input" placeholder="e.g. chardet, six (blank = all at-risk)" aria-label="Only these dependencies"></label>
         </div>
       </div>
       <div id="llm-note" class="callout warn hidden"></div>
@@ -125,6 +126,6 @@
 </aside>
 <div id="scrim" class="scrim hidden"></div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=4"></script>
 </body>
 </html>

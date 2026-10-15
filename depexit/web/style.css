@@ -260,3 +260,4 @@ th input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px
 .rbar .s { background: var(--ok); } .rbar .d { background: var(--bad); } .rbar .n { background: var(--idle-line); }
 .rcell { display: flex; flex-direction: column; gap: 3px; }
 .ev-sub { font-size: 11.5px; color: var(--muted); }
+.inline-num input.only-input { width: 230px; }

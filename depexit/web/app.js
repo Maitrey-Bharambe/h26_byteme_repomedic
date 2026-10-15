@@ -97,6 +97,7 @@ $("#start-form").onsubmit = async (ev) => {
   const body = { target: $("#target").value.trim(), pythons, use_llm: $("#use-llm").checked,
     model: $("#use-llm").checked ? $("#model").value || null : null,
     include_low: $("#include-low").checked, max_fix_attempts: +$("#fix").value,
+    only: $("#only").value.split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter(Boolean),
     acknowledge_untrusted_execution: $("#ack").checked };
   $("#start-btn").disabled = true;
   try {
