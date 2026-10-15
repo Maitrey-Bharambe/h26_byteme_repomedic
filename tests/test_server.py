@@ -106,3 +106,25 @@ def test_full_workflow_plan_review_execute_capsule_apply(client, small_repo, fak
 
 def test_unknown_job_and_capsule(client):
     assert client.get("/api/jobs/nope").status_code == 404
+
+
+def test_executed_dependency_can_be_rerun_and_disk_runs_are_read_only(client, small_repo, tmp_path):
+    jid = start(client, small_repo).get_json()["id"]
+    assert wait(client, jid)["state"] == "awaiting_review"
+    assert client.get(f"/api/jobs/{jid}").get_json()["executable"] is True
+    assert client.post(f"/api/jobs/{jid}/execute", json={"deps": ["six"]}).status_code == 202
+    assert wait(client, jid, ("done", "error"))["state"] == "done"
+    # six is executed now; selecting it again re-runs migration + verification
+    assert client.post(f"/api/jobs/{jid}/execute", json={"deps": ["six"]}).status_code == 202
+    v = wait(client, jid, ("done", "error"))
+    assert v["state"] == "done"
+    six = next(d for d in v["index"]["dependencies"] if d["name"] == "six")
+    assert six["status"] != "planned"
+
+    # a new server process sees the run on disk, read-only
+    app2 = server.create_app(tmp_path / "runs")
+    c2 = app2.test_client()
+    v2 = c2.get(f"/api/jobs/{jid}").get_json()
+    assert v2["executable"] is False and v2["state"] == "done"
+    r = c2.post(f"/api/jobs/{jid}/execute", json={"deps": ["six"]})
+    assert r.status_code == 409 and "loaded from disk" in r.get_json()["error"]

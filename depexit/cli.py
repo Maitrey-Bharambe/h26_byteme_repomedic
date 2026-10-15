@@ -11,8 +11,8 @@ from .pipeline import Pipeline, PipelineError
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="depexit", description="Dependency Exit Capsules, verified by execution, assisted by Gemma 4.")
-    ap.add_argument("--version", action="version", version=f"depexit {__version__}")
+    ap = argparse.ArgumentParser(prog="repomedic", description="RepoMedic: dependency exits verified by execution, assisted by Gemma 4 (engine: depexit).")
+    ap.add_argument("--version", action="version", version=f"repomedic {__version__} (depexit engine)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("analyze", help="analyse a repository and produce Exit Capsules")
     a.add_argument("target", help="path to a local repo or a git URL")

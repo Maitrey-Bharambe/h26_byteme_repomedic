@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Test blindness check**: sabotages each used dependency symbol (raise / none / wrong) in the original suite and classifies the dependency as watched, partly blind, blind, not exercised, not run or not applicable, listing the tests that caught it.
+- **Replay check**: records real calls of the repository's own functions during the original tests and replays them on the migrated code (identical / different / exception changed / not replayable). Network-touching functions are skipped.
+- New verdicts `verified_by_replay` and `weakly_verified`, a *Test visibility* column, a replay table in the UI, and *Test visibility* and *Replay* columns in REPORT.md.
+- Beige and brown UI palette (light and dark); earlier runs on disk are viewable after a server restart.
 - **Web workbench** (`depexit serve`, Flask + vanilla HTML/CSS/JS): repository analysis with
   live pipeline events, summary tiles, a migration graph, a risk explorer, review of the
   plan before execution, migrate-and-verify for selected dependencies, a combined-result
@@ -25,7 +29,7 @@ All notable changes to this project are documented here. The format follows
   detection of prompt truncation.
 - Execution boundary: an allowlisted environment for repository code, HOME and TMP
   redirection, target validation, and documentation of the lack of OS-level isolation.
-- Test suite (52 tests), CI workflow, docs, and community and security files.
+- Test suite (59 tests), CI workflow, docs, and community and security files.
 
 ### Changed
 - A baseline-passing test that no longer runs after a migration counts as a regression.

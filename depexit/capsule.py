@@ -15,7 +15,11 @@ from pathlib import Path
 
 from . import sandbox
 from .risk import SEVERITY
+from .replay import summary as replay_summary
 from .util import write_json
+
+VISIBILITY = {"watched": "👁 watched", "partly_blind": "◐ partly blind", "blind": "🙈 blind",
+              "not_exercised": "∅ not exercised", "not_run": "⚠ not run", "not_applicable": "– n/a"}
 
 SCHEMA = "dependency-exit-capsule/1.0"
 BADGE = {"observed": "🔎 OBSERVED", "executed": "🧪 EXECUTED", "ai_generated": "🤖 AI-GENERATED (Gemma 4)",
@@ -24,6 +28,8 @@ STATUS_TEXT = {
     "verified": "✅ Verified: every verification requirement was executed and met",
     "verified_with_gaps": "🟡 Verified with gaps: all required checks met; advisory checks failed or were not run",
     "incomplete": "⚪ Incomplete: nothing failed, but at least one required check could not be performed",
+    "verified_by_replay": "🔵 Verified by replay: tests are blind to it, but real recorded calls replay identically",
+    "weakly_verified": "🟤 Weakly verified: tests pass but cannot see this dependency, and no real call was replayed",
     "failed": "❌ Failed verification: a required check failed (see requirements and gaps)",
     "planned": "📝 Planned: proposal ready for review, nothing executed yet",
     "partial": "🟠 Partial: some verified migrations could not be merged",
@@ -218,6 +224,8 @@ def build_capsule(dep, res, run_meta, out_root: Path) -> dict:
                             "patch": "migration.patch" if res.get("patch") else None},
         "validation_of_ai_output": {"provenance": "observed", "checks": res.get("validation", [])},
         "verification": verif,
+        "test_blindness": res.get("test_blindness"),
+        "replay": res.get("replay"),
         "suggested_tests": {
             "existing_suite": {"provenance": "observed", "runner": "pytest",
                                "command": "python -m pytest -q"},
@@ -314,6 +322,34 @@ def render_md(c: dict) -> str:
     att = c["executed_test_results"]["attempts"]
     if len(att) > 1:
         lines += ["", f"Fix loop: {len(att)} attempts; Gemma received the executed failures as feedback after each failed attempt."]
+    tb = c.get("test_blindness")
+    if tb:
+        lines += ["", f"### Test visibility {BADGE['executed']}", "",
+                  f"**{VISIBILITY.get(tb['classification'], tb['classification'])}**: {tb.get('reason', '')} "
+                  f"(original suite, Python {tb.get('python')})", ""]
+        if tb.get("runs"):
+            lines += ["| Symbol | Sabotage | Calls | Outcome | Caught by |", "|---|---|---|---|---|"]
+            for r in tb["runs"]:
+                lines.append(f"| `{r['symbol']}` | {r['mode']} | {r.get('calls', '–')} | {r['outcome']} | "
+                             f"{', '.join(r.get('catching_tests', [])[:3]) or r.get('reason', '–')} |")
+    rp = c.get("replay")
+    if rp:
+        cn = rp.get("counts") or {}
+        lines += ["", f"### Replay of real recorded calls {BADGE['executed']} (recorded data)", "",
+                  f"State: **{rp.get('state')}**" + (f" ({rp.get('reason')})" if rp.get("reason") else "")
+                  + f" · identical {cn.get('identical', 0)} · different {cn.get('different', 0)}"
+                  f" · exception changed {cn.get('exception_changed', 0)} · not replayable {cn.get('not_replayable', 0)}", ""]
+        if rp.get("differences"):
+            lines += ["| Function | Input | Original | Replacement | Source test |", "|---|---|---|---|---|"]
+            for d in rp["differences"][:20]:
+                lines.append(f"| `{d['function']}` | `{d['input'][:60].replace('|', '/')}` | "
+                             f"`{str(d['original'])[:60].replace('|', '/')}` | `{str(d['replacement'])[:60].replace('|', '/')}` | "
+                             f"{d.get('test') or '–'} |")
+        for sk in rp.get("skipped", []):
+            lines.append(f"- skipped `{sk['function']}`: {sk['reason']}")
+        if rp.get("ai_generated_inputs"):
+            ag = rp["ai_generated_inputs"]
+            lines.append(f"- {BADGE['ai_generated']} extra inputs for {', '.join(ag['functions'])}: {ag['note']}")
     vr = c.get("verification") or {}
     if vr.get("requirements"):
         lines += ["", f"### Verification requirements {BADGE.get(vr['provenance'], '')}", "",
@@ -418,6 +454,10 @@ def write_all(out: Path, run_meta, ranked, selected, results, combined) -> None:
                           "indicators": [i["id"] for i in d.indicators],
                           "status": caps.get(d.name, {}).get("status"),
                           "status_reason": caps.get(d.name, {}).get("status_reason"),
+                          "test_visibility": (caps.get(d.name, {}).get("test_blindness") or {}).get("classification"),
+                          "test_visibility_reason": (caps.get(d.name, {}).get("test_blindness") or {}).get("reason"),
+                          "catching_tests": (caps.get(d.name, {}).get("test_blindness") or {}).get("catching_tests", []),
+                          "replay": replay_summary(caps.get(d.name, {}).get("replay")) if d.name in sel else None,
                           "action": (caps.get(d.name, {}).get("proposed_replacement") or {}).get("action"),
                           "action_target": _target((caps.get(d.name, {}).get("proposed_replacement") or {})),
                           "capsule": f"capsules/{d.name}/CAPSULE.md" if d.name in sel else None}
@@ -445,11 +485,18 @@ def render_index(ix: dict) -> str:
         ce = b["tests"]["collection_error"]
         lines.append(f"| {py} | {'✅' if b['env']['ok'] else '❌'} | {c['passed']} | {c['failed']} | {c['error']} | "
                      f"{(ce.splitlines()[-1][:80] if ce else '–')} |")
-    lines += ["", "## Dependencies", "", "| Dependency | Risk | Indicators | Action | Status | Capsule |",
-              "|---|---|---|---|---|---|"]
+    lines += ["", "## Dependencies", "",
+              "| Dependency | Risk | Indicators | Action | Test visibility | Replay | Status | Why | Capsule |",
+              "|---|---|---|---|---|---|---|---|---|"]
     for d in ix["dependencies"]:
+        rp = d.get("replay") or {}
+        rtxt = ("–" if not rp or rp.get("state") in (None, "not_applicable") else
+                f"{rp['identical']}✓ {rp['different']}✗ {rp['not_replayable']}?" if rp.get("state") == "compared"
+                else rp.get("state"))
         lines.append(f"| `{d['name']}` | {d['max_severity']} ({d['score']}) | {', '.join(d['indicators']) or '–'} | "
-                     f"{d['action'] or '–'} | {STATUS_TEXT.get(d['status'], '–').split(':')[0] if d['status'] else 'healthy'} | "
+                     f"{d['action'] or '–'} | {VISIBILITY.get(d.get('test_visibility'), '–')} | {rtxt} | "
+                     f"{STATUS_TEXT.get(d['status'], '–').split(':')[0] if d['status'] else 'healthy'} | "
+                     f"{(d.get('status_reason') or '').replace('|', '/')[:120]} | "
                      + (f"[open]({d['capsule']})" if d["capsule"] else "–") + " |")
     if ix.get("combined"):
         cb = ix["combined"]

@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Depexit Workbench</title>
+<title>RepoMedic Workbench</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="top">
   <div class="brand">
     <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 12h11M11 6l6 6-6 6M20 5v14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-    <div><div class="brand-name">depexit</div><div class="brand-sub">Dependency exit workbench</div></div>
+    <div><div class="brand-name">RepoMedic</div><div class="brand-sub">Dependency exit workbench · depexit engine</div></div>
   </div>
   <div class="top-right">
     <div id="llm-pill" class="pill"><span class="dot"></span><span class="txt">Gemma: checking…</span></div>
@@ -86,8 +86,9 @@
           <span class="prov ai_generated">AI · Gemma</span> validated model output
           <span class="prov rule_based">rule</span> deterministic fallback</div></div>
     </div>
+    <div id="readonly-banner" class="callout info hidden" style="margin:0 0 12px"></div>
     <div class="table-wrap"><table id="deps-table" class="data"><thead><tr>
-      <th class="w-check"></th><th>Dependency</th><th>Risk</th><th>Indicators</th><th>Plan</th><th>Status</th></tr></thead>
+      <th class="w-check"><input type="checkbox" id="select-all" aria-label="Select all runnable" title="Select all runnable"></th><th>Dependency</th><th>Risk</th><th>Indicators</th><th>Test visibility</th><th>Plan</th><th>Status</th></tr></thead>
       <tbody></tbody></table></div>
     <div class="action-bar">
       <button id="exec-btn" class="primary" disabled>Select planned dependencies</button>

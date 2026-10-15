@@ -37,6 +37,8 @@
 | `executed_test_results.per_python` | executed | install, versions, test deltas (`fixed`, `regressed`, `still_failing`, collection errors), warnings, replacement import, probe summary and raw results, log path |
 | `executed_test_results.attempts[]` | executed | the fix-loop history |
 | `compatibility_gaps[]` | executed / observed | `{kind, detail, pythons[], provenance}`; kinds include `install-failed`, `test-suite-broken`, `test-regression`, `test-not-run`, `still-failing`, `behaviour-difference`, `new-warning`, `still-installed-transitively`, `leftover-code-reference`, `leftover-tooling-reference` |
+| `test_blindness` | executed | `classification, reason, python, symbols, runs[] {symbol, mode, calls, outcome, catching_tests, command, exit_code}, catching_tests` |
+| `replay` | executed_recorded | `state, python, functions[] {function, recorded_calls}, counts {identical, different, exception_changed, not_replayable}, differences[] {function, input, original, replacement, test, kind}, not_replayable[], skipped[], identical_examples[], ai_generated_inputs` |
 | `ai_review` | ai_generated | summary, gap explanations, open concerns, confidence |
 | `open_concerns_and_limitations[]` | mixed | `{provenance, text}`; includes plan uncertainties |
 
@@ -60,7 +62,7 @@ Run metadata (target, AI status, execution boundary, baseline per Python, manife
 parse errors, seconds), plus:
 
 - `dependencies[]`: `name, at_risk, score, max_severity, indicators[], status,
-  status_reason, action, action_target, capsule`
+  status_reason, action, action_target, test_visibility, test_visibility_reason, catching_tests, replay {state, identical, different, not_replayable, skipped}, capsule`
 - `combined`: `status, verification, dependencies[], merged_edits[], conflicts[],
   rebased_by_ai[], skipped[], excluded_unverified[], comparison{py: …}, residual{dep: […]}`
 

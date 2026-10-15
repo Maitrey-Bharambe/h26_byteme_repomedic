@@ -28,6 +28,7 @@ class UsageSite:
     code: str
     private: bool = False
     alias: str | None = None
+    function: str | None = None   # enclosing def as a __qualname__, e.g. "Cache.path" / "f.<locals>.g"
 
     def to_dict(self):
         return asdict(self)
@@ -70,12 +71,35 @@ class _Visitor(ast.NodeVisitor):
         self.aliases: dict[str, str] = {}
         self.alias_names: dict[str, str] = {}
         self.sites: list[UsageSite] = []
+        self.scope: list[tuple[str, str]] = []   # (kind, name) of enclosing class/def
+
+    def qualname(self) -> str | None:
+        """__qualname__ of the innermost enclosing def; None at module or class-body level."""
+        if not self.scope or self.scope[-1][0] != "def":
+            return None
+        parts = []
+        for i, (kind, name) in enumerate(self.scope):
+            parts.append(name)
+            if kind == "def" and i < len(self.scope) - 1:
+                parts.append("<locals>")
+        return ".".join(parts)
 
     def add(self, node, symbol: str, kind: str, alias: str | None = None):
         line = getattr(node, "lineno", 0)
         code = self.lines[line - 1].strip() if 0 < line <= len(self.lines) else ""
         self.sites.append(UsageSite(symbol.split(".")[0], symbol, kind, self.rel, line, code,
-                                    _is_private(symbol), alias))
+                                    _is_private(symbol), alias, self.qualname()))
+
+    def _visit_def(self, node):
+        for d in node.decorator_list:
+            self.visit(d)
+        self.scope.append(("def", node.name))
+        for s in node.body:
+            self.visit(s)
+        self.scope.pop()
+
+    visit_FunctionDef = _visit_def
+    visit_AsyncFunctionDef = _visit_def
 
     # imports -------------------------------------------------------------
     def visit_Import(self, node):
@@ -150,8 +174,10 @@ class _Visitor(ast.NodeVisitor):
             self.visit(k.value)
         for d in node.decorator_list:
             self.visit(d)
+        self.scope.append(("class", node.name))
         for s in node.body:
             self.visit(s)
+        self.scope.pop()
 
 
 def scan_python(root: Path) -> tuple[list[UsageSite], list[dict]]:
@@ -199,3 +225,135 @@ def scan_tooling(root: Path, scripts_by_dist: dict[str, list[str]],
                 if m and not line.lstrip().startswith("#"):
                     hits.append((dist, UsageSite(dist, m.group(1), "tooling", rel, i, line.strip())))
     return hits
+
+
+# --------------------------------------------------------------------------- replay targets
+
+# Entry points that open connections. Pure helpers of the same libraries (e.g.
+# requests.utils.*, requests.exceptions.*) are not network I/O.
+NETWORK_PREFIXES = (
+    "requests.get", "requests.post", "requests.put", "requests.patch", "requests.delete",
+    "requests.head", "requests.options", "requests.request", "requests.Session", "requests.session",
+    "requests.api", "requests.sessions", "urllib.request", "urllib3", "socket", "http.client",
+    "httpx", "aiohttp", "ftplib", "smtplib", "websocket", "websockets", "grpc", "boto3",
+    "botocore", "paramiko",
+)
+
+
+def _is_network(symbol: str) -> bool:
+    return any(symbol == p or symbol.startswith(p + ".") for p in NETWORK_PREFIXES)
+
+
+def module_name(rel: str) -> str:
+    mod = rel[:-3] if rel.endswith(".py") else rel
+    if mod.startswith("src/"):
+        mod = mod[4:]
+    mod = mod.replace("/", ".")
+    return mod[:-9] if mod.endswith(".__init__") else mod
+
+
+def _is_test_file(rel: str) -> bool:
+    name = rel.split("/")[-1]
+    return name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py"         or "/tests/" in "/" + rel or "/test/" in "/" + rel
+
+
+def _find_def(tree, qualname: str):
+    node, parts = tree, qualname.split(".")
+    for part in parts:
+        node = next((n for n in getattr(node, "body", [])
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                     and n.name == part), None)
+        if node is None:
+            return None
+    return node
+
+
+def _local_calls(node, rel: str, aliases: dict[str, str], imports_rel: dict[str, str]) -> set[str]:
+    """Fully qualified repo-local functions called inside `node`."""
+    mod = module_name(rel)
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+            name = n.func.id
+            out.add(imports_rel.get(name) or aliases.get(name) or f"{mod}.{name}")
+    return out
+
+
+def network_functions(root: Path) -> dict[str, str]:
+    """Repo functions that (transitively, through repo-local calls) perform network I/O."""
+    defs: dict[str, tuple] = {}
+    for path in python_files(root):
+        rel = path.relative_to(root).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text)
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        v = _Visitor(rel, text.splitlines())
+        v.visit(tree)
+        pkg = module_name(rel).rsplit(".", 1)[0] if "." in module_name(rel) else ""
+        imports_rel = {}
+        for n in tree.body:
+            if isinstance(n, ast.ImportFrom) and n.level:
+                base = pkg.rsplit(".", n.level - 1)[0] if n.level > 1 else pkg
+                for a in n.names:
+                    imports_rel[a.asname or a.name] = ".".join(x for x in (base, n.module, a.name) if x)
+        for n in tree.body:
+            nodes = [n] + ([m for m in n.body] if isinstance(n, ast.ClassDef) else [])
+            for d in nodes:
+                if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    qual = d.name if d is n else f"{n.name}.{d.name}"
+                    net = sorted({q for x in ast.walk(d) if isinstance(x, (ast.Name, ast.Attribute))
+                                  for q in [v.resolve(x) if isinstance(x, ast.Attribute) else v.aliases.get(x.id)]
+                                  if q and _is_network(q)})
+                    defs[f"{module_name(rel)}.{qual}"] = (net, _local_calls(d, rel, v.aliases, imports_rel))
+    reason = {f: f"performs network I/O via {', '.join(n)}" for f, (n, _) in defs.items() if n}
+    changed = True
+    while changed:  # propagate through repo-local calls
+        changed = False
+        for f, (_, calls) in defs.items():
+            if f not in reason:
+                hit = next((c for c in calls if c in reason), None)
+                if hit:
+                    reason[f] = f"calls {hit}, which {reason[hit].split(' (')[0]}"
+                    changed = True
+    return reason
+
+
+def replay_targets(root: Path, sites: list[dict]) -> list[dict]:
+    """The repository's own functions that contain usage of a dependency.
+
+    Their names and signatures survive a migration, so the same recorded inputs can be
+    replayed against the migrated code. Each target says whether it is safe to replay.
+    """
+    by_fn: dict[tuple[str, str], list[int]] = {}
+    for s in sites:
+        f, fn = s.get("file", ""), s.get("function")
+        if s.get("kind") == "tooling" or not fn or not f.endswith(".py") or _is_test_file(f):
+            continue
+        by_fn.setdefault((f, fn), []).append(s["line"])
+    out = []
+    network = network_functions(root) if by_fn else {}
+    for (rel, qual), lines in sorted(by_fn.items()):
+        t = {"module": module_name(rel), "qualname": qual, "file": rel, "lines": sorted(set(lines)),
+             "function": f"{module_name(rel)}.{qual}", "replayable": True, "skip": None}
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+            tree = ast.parse(text)
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+            t.update(replayable=False, skip=f"unparseable: {exc}")
+            out.append(t)
+            continue
+        node = None if "<locals>" in qual else _find_def(tree, qual)
+        if node is None:
+            t.update(replayable=False, skip="nested or dynamically defined function")
+        elif isinstance(node, ast.AsyncFunctionDef):
+            t.update(replayable=False, skip="async function")
+        elif any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node)):
+            t.update(replayable=False, skip="generator function")
+        elif node.decorator_list:
+            t.update(replayable=False, skip="decorated function (module attribute is not the plain function)")
+        elif t["function"] in network:
+            t.update(replayable=False, skip=f"side_effect_skipped: {network[t['function']]}")
+        out.append(t)
+    return out

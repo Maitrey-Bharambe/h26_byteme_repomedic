@@ -9,8 +9,13 @@ const PROV_LABEL = { observed: "observed", executed: "executed", ai_generated: "
 const STATUS_LABEL = { verified: "Verified", verified_with_gaps: "Verified · gaps", incomplete: "Incomplete",
   failed: "Failed", planned: "Planned", not_executed: "Kept (no exit)", tool_error: "Tool error", partial: "Partial",
   running: "Running", awaiting_review: "Plans ready · review", done: "Done", error: "Error", queued: "Queued",
-  met: "met", not_checked: "not checked", pending: "pending", applied: "applied" };
+  met: "met", not_checked: "not checked", pending: "pending", applied: "applied",
+  verified_by_replay: "Verified by replay", weakly_verified: "Weakly verified" };
+const VIS_LABEL = { watched: "👁 watched", partly_blind: "◐ partly blind", blind: "🙈 blind",
+  not_exercised: "∅ not exercised", not_run: "⚠ not run", not_applicable: "– n/a" };
+const vis = (c, why) => c ? h("span", { class: "vis vis-" + c, title: why || "" }, VIS_LABEL[c] || c) : h("span", { class: "muted" }, "–");
 const TONE = { verified: "ok", verified_with_gaps: "warn", partial: "warn", failed: "bad", tool_error: "bad",
+  verified_by_replay: "info", weakly_verified: "warn",
   incomplete: "idle", not_executed: "idle", planned: "info" };
 const ACTION_ICON = { upgrade: "↑", replace: "⇄", stdlib: "≡", remove: "✕", declare: "+", keep: "•" };
 const SEV_W = { critical: 100, high: 78, medium: 52, low: 28, info: 14, none: 4 };
@@ -138,13 +143,13 @@ function renderRun(v) {
   renderTiles(v.index);
   renderBaseline(v.index, v.execution_boundary);
   renderGraph(v.index, v.state);
-  renderDeps(v.index, v.state);
+  renderDeps(v.index, v.state, v.executable !== false);
   renderCombined(v.index, v.state);
   if (current) openDep(current, true);
 }
 
 function tile(k, v, s, tone) {
-  return h("div", { class: "tile " + (tone || "") }, h("div", { class: "k" }, k), h("div", { class: "v" }, v), s ? h("div", { class: "s" }, s) : null);
+  return h("div", { class: "tile " + (tone || "") }, h("div", { class: "k" }, k), h("div", { class: "v" + (/^[0-9]/.test(String(v)) ? "" : " txt") }, v), s ? h("div", { class: "s" }, s) : null);
 }
 
 function renderTiles(ix) {
@@ -157,7 +162,10 @@ function renderTiles(ix) {
     tile("Dependencies", ix.dependencies.length, "declared, imported or installed"),
     tile("At risk", caps.length, `${ix.dependencies.filter((d) => d.max_severity === "critical").length} critical`, caps.length ? "bad" : "ok"),
     tile("Planned", count("planned") + executed, `${count("not_executed")} kept as-is`, "info"),
-    tile("Verified", count("verified", "verified_with_gaps"), `${count("verified_with_gaps")} with gaps`, "ok"),
+    tile("Verified", count("verified", "verified_with_gaps", "verified_by_replay"),
+      `${count("verified_by_replay")} by replay · ${count("weakly_verified")} weakly`, "ok"),
+    tile("Tests blind", caps.filter((d) => ["blind", "not_exercised", "partly_blind"].includes(d.test_visibility)).length,
+      "deps the tests cannot fully see", "warn"),
     tile("Failed", count("failed", "tool_error"), "a required check failed", count("failed", "tool_error") ? "bad" : ""),
     tile("Incomplete", count("incomplete"), "required check not run", count("incomplete") ? "warn" : ""),
     bc ? tile(`Baseline py${base[0]}`, `${bc.passed}/${bc.passed + bc.failed + bc.error}`, "tests passing before changes", bc.failed + bc.error ? "warn" : "ok") : null,
@@ -254,32 +262,76 @@ function renderGraph(ix, state) {
 }
 
 // ------------------------------------------------------------------ dependencies table
-function renderDeps(ix, state) {
+// a dependency can be (re-)run when it has a real plan (not "keep") and the run is live
+const runnable = (d) => d.capsule && d.action && d.action !== "keep" && d.status && d.status !== "not_executed";
+let depsCtx = { state: null, executable: true, runnable: [] };
+
+function renderDeps(ix, state, executable) {
   $("#deps-card").classList.remove("hidden");
-  const canRun = state === "awaiting_review" || state === "done";
-  const rows = ix.dependencies.filter((d) => d.at_risk || d.indicators.length).map((d) => {
-    const plannable = d.status === "planned" && canRun;
-    const cb = h("input", { type: "checkbox", disabled: !plannable, checked: plannable && selected.has(d.name),
-      title: plannable ? "Select for migration" : "Only planned dependencies can be executed",
+  const canRun = executable && (state === "awaiting_review" || state === "done");
+  const list = ix.dependencies.filter((d) => d.at_risk || d.indicators.length);
+  depsCtx = { state, executable, runnable: canRun ? list.filter(runnable).map((d) => d.name) : [] };
+  const banner = $("#readonly-banner");
+  if (!executable) {
+    banner.classList.remove("hidden");
+    banner.replaceChildren(h("b", {}, "Read-only run. "),
+      "This run was loaded from disk after a server restart, so its migrations cannot be started from here. ",
+      h("button", { class: "secondary", type: "button", onclick: reanalyse }, "Re-analyse this repository"));
+  } else if (state === "running") {
+    banner.classList.remove("hidden");
+    banner.replaceChildren("Selection is locked while the pipeline is running.");
+  } else banner.classList.add("hidden");
+  const all = $("#select-all");
+  all.disabled = !depsCtx.runnable.length;
+  all.checked = depsCtx.runnable.length > 0 && depsCtx.runnable.every((n) => selected.has(n));
+  const rows = list.map((d) => {
+    const ok = depsCtx.runnable.includes(d.name);
+    const why = !executable ? "Read-only run: re-analyse to migrate"
+      : state === "running" ? "Pipeline is running"
+      : !d.action || d.action === "keep" ? "No migration planned (keep)" : "";
+    const cb = h("input", { type: "checkbox", disabled: !ok, checked: ok && selected.has(d.name),
+      "aria-label": `Select ${d.name}`,
+      title: ok ? (d.status === "planned" ? "Select to migrate & verify" : "Select to re-run migration & verification") : why,
       onclick: (e) => { e.stopPropagation(); e.target.checked ? selected.add(d.name) : selected.delete(d.name); updateExec(state); } });
     return h("tr", { class: (d.capsule ? "clickable" : "") + (current === d.name ? " selected" : ""), onclick: () => d.capsule && openDep(d.name) },
-      h("td", {}, cb),
+      h("td", { onclick: (e) => e.stopPropagation() }, cb),
       h("td", {}, h("div", { class: "dep-name" }, d.name), d.status_reason && d.status !== "planned" ? h("div", { class: "dep-sub" }, clip(d.status_reason, 70)) : null),
       h("td", {}, h("div", { class: "risk sev-" + d.max_severity }, h("span", { class: "risk-bar" }, h("i", { style: `width:${SEV_W[d.max_severity] || 4}%` })),
         h("span", { class: "sev-label" }, d.max_severity), h("span", { class: "muted small" }, d.score))),
       h("td", { class: "tags" }, d.indicators.map((i) => h("span", {}, i))),
+      h("td", {}, vis(d.test_visibility, d.test_visibility_reason),
+        d.catching_tests && d.catching_tests.length ? h("div", { class: "dep-sub", title: d.catching_tests.join("\n") },
+          `caught by ${d.catching_tests.length} test(s)`) : null),
       h("td", {}, d.action ? h("span", { class: "action" }, h("span", { class: "ic" }, ACTION_ICON[d.action] || "?"), d.action,
         d.action_target ? h("span", { class: "muted small" }, d.action_target) : null) : h("span", { class: "muted" }, "–")),
       h("td", {}, d.status ? status(d.status) : h("span", { class: "muted" }, "healthy")));
   });
   $("#deps-table tbody").replaceChildren(...rows);
-  for (const n of [...selected]) if (!ix.dependencies.some((d) => d.name === n && d.status === "planned")) selected.delete(n);
+  for (const n of [...selected]) if (!depsCtx.runnable.includes(n)) selected.delete(n);
   updateExec(state);
 }
-function updateExec(state) {
+function updateExec() {
   const b = $("#exec-btn");
-  b.disabled = !selected.size || !(state === "awaiting_review" || state === "done");
-  b.textContent = selected.size ? `Migrate & verify ${selected.size} selected` : "Select planned dependencies to migrate";
+  b.disabled = !selected.size || !depsCtx.runnable.length;
+  const rerun = [...selected].some((n) => {
+    const d = (job.index && job.index.dependencies || []).find((x) => x.name === n);
+    return d && d.status !== "planned";
+  });
+  b.textContent = !depsCtx.executable ? "Read-only run"
+    : selected.size ? `${rerun ? "Migrate & re-verify" : "Migrate & verify"} ${selected.size} selected`
+    : depsCtx.runnable.length ? "Select dependencies to migrate" : "Nothing to migrate";
+  const all = $("#select-all");
+  all.checked = depsCtx.runnable.length > 0 && depsCtx.runnable.every((n) => selected.has(n));
+}
+$("#select-all").onclick = (e) => {
+  if (e.target.checked) depsCtx.runnable.forEach((n) => selected.add(n)); else selected.clear();
+  document.querySelectorAll("#deps-table tbody input[type=checkbox]:not(:disabled)").forEach((c) => { c.checked = e.target.checked; });
+  updateExec();
+};
+function reanalyse() {
+  $("#target").value = job.target || "";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  $("#ack").focus();
 }
 $("#exec-btn").onclick = async () => {
   try {
@@ -438,7 +490,10 @@ function tVerify(c) {
   const ex = c.executed_test_results, v = c.verification;
   if (!Object.keys(ex.per_python || {}).length)
     return [h("div", { class: "callout info" }, c.status === "planned" ? "Not executed yet. Select it in the workbench and run “Migrate & verify”." : "Nothing was executed for this dependency.")];
-  const out = [h("h3", {}, "Requirements ", prov("executed")), requirementsTable(v.requirements), h("h3", {}, "Per Python ", prov("executed"))];
+  const out = [h("div", { class: "callout " + ({ ok: "ok", warn: "warn", bad: "bad" }[TONE[c.status]] || "info") },
+      h("b", {}, "Verdict: ", STATUS_LABEL[c.status] || c.status), " — ", v.verdict_reason || c.status_reason || ""),
+    visibilitySection(c.test_blindness), replaySection(c.replay),
+    h("h3", {}, "Requirements ", prov("executed")), requirementsTable(v.requirements), h("h3", {}, "Per Python ", prov("executed"))];
   for (const [py, e] of Object.entries(ex.per_python)) {
     const t = e.tests || {}, o = t.original || {}, n = t.replacement || {};
     out.push(h("div", { class: "box" }, h("div", { class: "box-title" }, `Python ${py}`, e.install_ok ? status("met", "installed") : status("failed", "install failed")),
@@ -510,3 +565,44 @@ loadLLM();
     if (r) attach(r);
   } catch (e) { /* no runs yet */ }
 })();
+
+// ------------------------------------------------------------------ blindness + replay views
+function visibilitySection(tb) {
+  if (!tb) return null;
+  const rows = (tb.runs || []).map((r) => h("tr", {}, h("td", {}, code(r.symbol)), h("td", {}, r.mode),
+    h("td", { class: "num" }, r.calls ?? "–"), h("td", {}, r.outcome),
+    h("td", { class: "small" }, (r.catching_tests || []).slice(0, 4).join(", ") || r.reason || "–")));
+  return h("div", {}, h("h3", {}, "Test visibility ", prov("executed")),
+    h("p", {}, vis(tb.classification), " ", tb.reason, h("span", { class: "muted small" }, ` · original suite on Python ${tb.python}`)),
+    rows.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, ...["Symbol", "Sabotage", "Calls", "Outcome", "Caught by"].map((t) => h("th", {}, t)))), h("tbody", {}, rows))) : null);
+}
+
+function replaySection(rp) {
+  if (!rp) return null;
+  const c = rp.counts || {};
+  const rows = [...(rp.differences || []).map((d) => [d, true]), ...(rp.identical_examples || []).slice(0, 10).map((d) => [d, false])]
+    .map(([d, bad]) => h("tr", { class: bad ? "diff-row" : "" }, h("td", {}, code(d.function)), h("td", {}, code(clip(d.input, 70))),
+      h("td", {}, code(clip(typeof d.original === "string" ? d.original : JSON.stringify(d.original), 70))),
+      h("td", {}, code(clip(typeof d.replacement === "string" ? d.replacement : JSON.stringify(d.replacement), 70))),
+      h("td", { class: "small" }, d.test || "–")));
+  const out = [h("h3", {}, "Replay of real recorded calls ", h("span", { class: "prov executed" }, "executed · recorded data")),
+    h("div", { class: "counts" }, status("verified", `${c.identical || 0} identical`),
+      status((c.different || 0) + (c.exception_changed || 0) ? "failed" : "met", `${(c.different || 0) + (c.exception_changed || 0)} different`),
+      status("incomplete", `${c.not_replayable || 0} not replayable`), status("planned", `state: ${rp.state}`)),
+    rp.reason ? h("p", { class: "muted small" }, rp.reason) : null];
+  if (rows.length) out.push(h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, ...["Function", "Input", "Original output", "Replacement output", "Source test"].map((t) => h("th", {}, t)))),
+    h("tbody", {}, rows))));
+  if ((rp.not_replayable || []).length) out.push(h("details", {}, h("summary", {}, `Not replayable (${rp.not_replayable.length})`),
+    h("ul", { class: "plain" }, rp.not_replayable.slice(0, 30).map((n) => h("li", {}, code(n.function), " ", clip(n.input, 60), " — ", n.reason)))));
+  if ((rp.skipped || []).length) out.push(h("ul", { class: "plain small" }, rp.skipped.map((x) => h("li", {}, "skipped ", code(x.function), ": ", x.reason))));
+  if (rp.ai_generated_inputs) out.push(h("p", { class: "small" }, prov("ai_generated"), " extra inputs for ",
+    rp.ai_generated_inputs.functions.join(", "), ": ", rp.ai_generated_inputs.note));
+  return h("div", {}, out);
+}
+window.addEventListener("hashchange", async () => {
+  const want = (location.hash.match(/run=([\w-]+)/) || [])[1];
+  if (!want || (job && job.id === want)) return;
+  try { attach(await api(`/api/jobs/${want}`)); } catch (e) { /* unknown run */ }
+});

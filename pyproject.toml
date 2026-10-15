@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "depexit"
+name = "repomedic"
 version = "0.1.0"
-description = "Gemma 4 powered dependency risk analysis that produces verifiable Dependency Exit Capsules"
+description = "RepoMedic: Gemma 4 powered dependency risk analysis with execution-verified Dependency Exit Capsules"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "depexit contributors" }]
@@ -32,6 +32,7 @@ web = ["flask>=3"]
 test = ["pytest>=8", "flask>=3"]
 
 [project.scripts]
+repomedic = "depexit.cli:main"
 depexit = "depexit.cli:main"
 
 [tool.setuptools]

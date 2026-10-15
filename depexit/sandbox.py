@@ -44,6 +44,7 @@ class Env:
     install_log: str
     install_cmds: list[list[str]] = field(default_factory=list)
     pkgmap: dict = field(default_factory=dict)
+    pythonpath: list = field(default_factory=list)   # extra entries (tests use this; venvs need none)
 
     def summary(self):
         return {"python": self.pkgmap.get("python", self.python_request), "ok": self.ok,
@@ -148,19 +149,26 @@ def _parse_junit(path: Path) -> dict[str, dict]:
     return tests
 
 
-def run_tests(env: Env, repo: Path, out_dir: Path) -> TestRun:
+def _pythonpath(env: Env, repo: Path) -> str:
+    return os.pathsep.join([str(HELPERS), str(repo), *map(str, env.pythonpath)])
+
+
+def run_tests(env: Env, repo: Path, out_dir: Path, plugins: tuple = (), extra_env: dict | None = None,
+              timeout: int = 1200) -> TestRun:
     out_dir.mkdir(parents=True, exist_ok=True)
     junit = out_dir / "junit.xml"
     warn_out = out_dir / "warnings.json"
     for f in (junit, warn_out):
         f.unlink(missing_ok=True)
     cmd = [str(env.python), "-m", "pytest", "-q", "-rfE", "-p", "no:cacheprovider",
-           "-p", "depexit_warnings", "-W", "default", f"--junitxml={junit}"]
-    pythonpath = os.pathsep.join([str(HELPERS), str(repo)])
-    r: RunResult = run(cmd, cwd=repo, env={"PYTHONPATH": pythonpath,
+           "-p", "depexit_warnings", *[x for p in plugins for x in ("-p", p)],
+           "-W", "default", f"--junitxml={junit}"]
+    r: RunResult = run(cmd, cwd=repo, env={"PYTHONPATH": _pythonpath(env, repo),
                                            "DEPEXIT_WARNINGS_OUT": str(warn_out),
-                                           "PYTHONDONTWRITEBYTECODE": "1", **_home(out_dir)},
-                       timeout=1200, untrusted=True)
+                                           "DEPEXIT_REPO_ROOT": str(repo),
+                                           "PYTHONDONTWRITEBYTECODE": "1", **_home(out_dir),
+                                           **(extra_env or {})},
+                       timeout=timeout, untrusted=True)
     tests = _parse_junit(junit)
     collection_error = None
     if r.returncode in (2, 3, 4) or (not tests and r.returncode != 5):
@@ -171,6 +179,15 @@ def run_tests(env: Env, repo: Path, out_dir: Path) -> TestRun:
     command = f"PYTHONPATH=<helpers>:{repo.name} " + " ".join(["python", *cmd[1:]])
     return TestRun(r.returncode, r.seconds, tests, read_json(warn_out, []) or [],
                    collection_error, log, command)
+
+
+def run_helper(env: Env, repo: Path, script: str, args: list[str], work: Path,
+               timeout: int = 300) -> RunResult:
+    """Run one of the _helpers scripts in the target venv with `repo` on sys.path."""
+    return run([str(env.python), str(HELPERS / script), *args], cwd=repo,
+               env={"PYTHONPATH": _pythonpath(env, repo), "DEPEXIT_REPO_ROOT": str(repo),
+                    "PYTHONDONTWRITEBYTECODE": "1", **_home(work)},
+               timeout=timeout, untrusted=True)
 
 
 # --------------------------------------------------------------------------- imports

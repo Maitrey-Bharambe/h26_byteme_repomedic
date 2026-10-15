@@ -115,6 +115,7 @@ class Job:
                 "options": self.opts, "stage": p.stage if p else None,
                 "event_count": len(p.events) if p else 0, "events": events,
                 "index": read_json(self.out / "index.json"),
+                "executable": p is not None,
                 "execution_boundary": EXECUTION_BOUNDARY}
 
 
@@ -124,6 +125,12 @@ def create_app(runs_dir: Path, pipeline_factory=Pipeline) -> Flask:
     runs_dir.mkdir(parents=True, exist_ok=True)
     jobs: dict[str, Job] = {}
     busy = threading.Lock()   # one execution at a time: runs are CPU/GPU heavy
+    for d in sorted(runs_dir.iterdir()):   # earlier runs on disk: viewable, not executable
+        ix = read_json(d / "index.json") if d.is_dir() else None
+        if ix:
+            j = Job(d.name, d, ix.get("target", {}).get("source", "?"), {"loaded_from_disk": True})
+            j.state, j.created = "done", (d / "index.json").stat().st_mtime
+            jobs[d.name] = j
 
     @app.before_request
     def _guard():
@@ -251,18 +258,31 @@ def create_app(runs_dir: Path, pipeline_factory=Pipeline) -> Flask:
     @app.post("/api/jobs/<jid>/execute")
     def api_execute(jid):
         job = get_job(jid)
+        if job.pipeline is None:
+            abort(409, "this run was loaded from disk; start a new run to execute migrations")
         if job.state not in ("awaiting_review", "done"):
             abort(409, f"run is {job.state}; plans must be ready before execution")
         body = request.get_json(silent=True) or {}
         names = body.get("deps")
-        planned = {n for n, r in job.pipeline.results.items() if r.get("status") == "planned"}
+        # anything with a plan can be (re-)executed; "keep" plans and crashed plans cannot
+        runnable = {n for n, r in job.pipeline.results.items()
+                    if r.get("plan") and r.get("status") not in ("not_executed", None)}
         if names is not None:
-            if not isinstance(names, list) or not set(names) <= planned:
-                abort(400, f"deps must be a subset of the planned dependencies: {sorted(planned)}")
-        if not (set(names) if names is not None else planned):
-            abort(400, "no planned dependency selected")
+            if not isinstance(names, list) or not set(names) <= runnable:
+                abort(400, f"deps must be a subset of the runnable dependencies: {sorted(runnable)}")
+        else:
+            names = sorted(n for n in runnable if job.pipeline.results[n].get("status") == "planned")
+        if not names:
+            abort(400, "no dependency selected")
         if busy.locked():
             abort(409, "another run is executing")
+        for n in names:  # re-verification starts from the reviewed plan, not the old result
+            r = job.pipeline.results[n]
+            if r.get("status") != "planned":
+                for k in ("comparison", "edits", "manifest_files", "patch", "repo", "residual",
+                          "verification", "replay", "review"):
+                    r.pop(k, None)
+                r["status"], r["status_reason"] = "planned", "re-queued for migration and verification"
 
         def exec_stage():
             job.pipeline.run_exits(names)
@@ -308,11 +328,11 @@ def create_app(runs_dir: Path, pipeline_factory=Pipeline) -> Flask:
             abort(400, "which must be a dependency name or 'combined'")
         if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
             abort(404, "no patch available")
-        p = job.pipeline
-        if not p or not getattr(p, "repo", None):
+        src = getattr(job.pipeline, "repo", None) or (job.out / ".work" / "source")
+        if not Path(src).is_dir():
             abort(409, "repository not available")
         dst = job.out / "applied" / which
-        sandbox.copy_repo(p.repo, dst)
+        sandbox.copy_repo(Path(src), dst)
         r = run(["git", "apply", "--verbose", "--whitespace=nowarn", str(patch)], cwd=dst, timeout=60)
         status = "applied" if r.ok else "failed"
         if not r.ok:

@@ -27,7 +27,7 @@ jobs:
       - name: Unit and integration tests (no network, no model)
         run: python -m pytest -q
       - name: CLI smoke test
-        run: depexit --version
+        run: repomedic --version
 
   web-assets:
     name: JavaScript syntax

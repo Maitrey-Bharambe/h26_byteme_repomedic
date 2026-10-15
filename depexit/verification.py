@@ -24,6 +24,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 MET, FAILED, NOT_CHECKED = "met", "failed", "not_checked"
+PASSING = ("verified", "verified_with_gaps", "verified_by_replay", "weakly_verified")
 REMOVES_ORIGINAL = {"remove", "replace", "stdlib"}
 INSTALLS_PACKAGE = {"upgrade", "replace", "declare"}
 
@@ -255,3 +256,54 @@ def evaluate_combined(applied: list[str], skipped: list[dict], comparison: dict,
     if not applied:
         status = "failed"
     return {"status": status, "requirements": evaluated}
+
+
+# --------------------------------------------------------------------------- final verdict
+
+def replay_requirement(replay: dict | None) -> dict | None:
+    """Required check once recorded calls were compared: no replay difference."""
+    if not replay or replay.get("state") != "compared":
+        return None
+    c = replay["counts"]
+    diffs = c.get("different", 0) + c.get("exception_changed", 0)
+    ex = [f"{d['function']}({d['input'][:60]}): {d['original']} -> {d['replacement']}"
+          for d in replay.get("differences", [])[:5]]
+    return {"id": "replay_identical", "required": True, "provenance": "executed",
+            "description": "Real calls recorded during the original tests give identical results on the migration",
+            "result": FAILED if diffs else (MET if c.get("identical") else NOT_CHECKED),
+            "evidence": ex or [f"{c.get('identical', 0)} identical, {c.get('not_replayable', 0)} not replayable"]}
+
+
+def final_verdict(base: str, blind: dict | None, replay: dict | None) -> tuple[str, str]:
+    """Combine executed tests (base status) with test blindness and recorded-data replay."""
+    b = (blind or {}).get("classification")
+    r = replay or {}
+    c = r.get("counts") or {}
+    diffs = c.get("different", 0) + c.get("exception_changed", 0)
+    compared = c.get("identical", 0) + diffs
+    if diffs:
+        return "failed", f"{diffs} recorded real call(s) give a different result after migration"
+    if base == "failed":
+        return "failed", "a required check failed"
+    if b == "not_run":
+        return "incomplete", f"test-blindness check could not run: {blind.get('reason')}"
+    if r.get("state") == "not_run":
+        return "incomplete", f"replay could not run: {r.get('reason')}"
+    if c.get("not_replayable", 0) > compared:
+        return "incomplete", (f"most recorded calls were not replayable "
+                              f"({c['not_replayable']} of {c['not_replayable'] + compared})")
+    if base == "incomplete":
+        return "incomplete", "a required check could not be performed"
+    if b in (None, "not_applicable"):
+        return base, "dependency not used by repository code; install and test checks only"
+    if b == "watched":
+        extra = f"; {c.get('identical', 0)} recorded calls replay identically" if compared else ""
+        return base, "tests detect every sabotage of this dependency" + extra
+    label = b.replace("_", " ")
+    if c.get("identical", 0):
+        return "verified_by_replay", (f"tests are {label} to this dependency, but "
+                                      f"{c['identical']} real recorded calls replay identically")
+    why = f"tests are {label} to this dependency and no recorded real call could be replayed"
+    if ((r.get("ai_generated_inputs") or {}).get("probes") or {}).get("executed"):
+        why += "; only AI-generated probe inputs were compared"
+    return "weakly_verified", why

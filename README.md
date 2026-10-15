@@ -1,4 +1,7 @@
-# depexit: Dependency Exit Capsules, verified by execution
+# RepoMedic: dependency exits, verified by execution
+
+> RepoMedic is the project; `depexit` is its analysis engine and Python package.
+> Both `repomedic` and `depexit` CLI commands work.
 
 **Track 1: Gemma 4, Dependency Resilience**
 
@@ -180,6 +183,23 @@ verification, and individual passes with a failed combined result.
 - Behaviour probes are only as good as the edge cases Gemma chooses; they add coverage but do not prove equivalence.
 - Advisory data comes from the PyPI JSON API; reachability of a vulnerable function is not yet analysed.
 - Non-Python references (Makefile, CI) are detected and reported as gaps but not rewritten.
+
+## Can the tests even see the dependency?
+
+A green test run only proves something if the tests notice when the dependency breaks.
+depexit measures this directly:
+
+- **Test blindness**: each used dependency symbol is sabotaged (raise, return None, return
+  a wrong value) and the *original* suite is re-run. The result is *watched*,
+  *partly blind*, *blind* or *not exercised*, together with the tests that caught it.
+- **Replay**: real calls of the repository's own functions are recorded during the
+  original tests and replayed on the migrated code. Any difference fails the migration and
+  is sent to Gemma's fix loop.
+
+Verdicts: `verified` (watched + identical), `verified_by_replay` (tests blind, but real
+recorded calls identical), `weakly_verified` (tests blind, nothing real replayed),
+`incomplete` (a check could not run) or `failed`. See
+[docs/verification.md](docs/verification.md#evidence-quality-test-blindness-and-replay).
 
 ## Documentation
 

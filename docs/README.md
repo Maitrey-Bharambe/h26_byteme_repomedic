@@ -1,4 +1,7 @@
-# depexit documentation
+# RepoMedic documentation
+
+RepoMedic's engine and Python package are called `depexit`; the `repomedic` and
+`depexit` commands are identical.
 
 depexit finds risky dependencies in a Python repository, plans how to exit each one
 (upgrade, replace, stdlib, remove, declare or keep), migrates the code in isolated working

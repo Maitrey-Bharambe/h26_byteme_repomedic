@@ -23,3 +23,11 @@ depexit-runs/
 *.swp
 .DS_Store
 Thumbs.db
+
+# run logs, scratch and local tooling (never commit)
+*.log
+scratch*/
+.claude/
+*.patch.orig
+*.rej
+pip-wheel-metadata/

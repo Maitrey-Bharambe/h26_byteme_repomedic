@@ -2,7 +2,7 @@
 
 ```bash
 pip install -e ".[test]"
-python -m pytest            # about 7 s; no network, no model, no real installs
+python -m pytest            # about 1 min; no network, no model, no real installs
 ```
 
 ## Layout
@@ -13,6 +13,7 @@ python -m pytest            # about 7 s; no network, no model, no real installs
 | `tests/test_ai_validation.py` | plan validation (hallucinated package, Python-incompatible version, stdlib module, replace-with-itself), API-mapping review and coverage, blocking vs advisory, edit validation (traversal, syntax, unplanned imports, files not given), JSON extraction, deterministic fake model replies |
 | `tests/test_verification.py` | every requirement and status; **migration fails verification**, **install success alone is not verified**, **incomplete verification**, probe errors, residual usage, version mismatch, vanished tests, **individual pass but combined fails**, partial combines |
 | `tests/test_pipeline_capsule.py` | the real `Pipeline` end to end over a scripted execution layer: plan stage modifies nothing, failed and incomplete exits, combined failure, events, capsule and report contents, target validation |
+| `tests/test_blindness_replay.py` | **real pytest subprocesses** on a fixture repo with two local "libraries": a watched dependency, one behind an env-var short circuit (`not_exercised`), a crashing check (`not_run` → `incomplete`), record + replay with a replacement that changes one recorded output (`different` → `failed`), an unpicklable argument (`not_replayable`, never verified), network/decorated function skipping, and every verdict rule |
 | `tests/test_server.py` | the HTTP API with the real pipeline: guards (host, JSON, acknowledgement, allowed roots, URL scheme), unavailable-model fallback, remote-endpoint refusal, full plan → review → execute → capsule → apply workflow, file-serving containment |
 
 ## Fakes (`tests/conftest.py`)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from packaging.utils import canonicalize_name
 
-from . import TOOL_NAME, __version__, ai, capsule, manifests, metadata, risk, sandbox, usage, verification
+from . import TOOL_NAME, __version__, ai, blindness, capsule, manifests, metadata, replay, risk, sandbox, usage, verification
 from .compare import compare_probes, compare_tests, compare_warnings, failure_feedback, unified_diff
 from .llm import LLM, LLMConfig, LLMError
 from .util import HttpCache, log, run, write_json
@@ -238,6 +238,36 @@ class Pipeline:
         self.selected = [d for d in self.ranked if (d.at_risk or (self.include_low and d.indicators))
                          and (self.only is None or d.name in self.only)]
         self.say("at-risk: " + (", ".join(f"{d.name}({d.max_severity})" for d in self.selected) or "none"))
+        self.evidence_checks(repo)
+
+    def evidence_checks(self, repo: Path) -> None:
+        """How much can the ORIGINAL tests prove? Test blindness + recording of real calls."""
+        py0 = self.pythons[0]
+        b0 = self.baselines[py0]
+        self.say("test blindness: sabotaging used dependency symbols in the original suite", stage="blindness")
+        try:
+            self.blindness = blindness.run_check(b0["env"], b0["repo"], b0["tests"], self.selected,
+                                                 self.work / "blindness", py0, jobs=max(2, self.jobs),
+                                                 log=self.say)
+        except Exception as exc:  # recorded; every dependency becomes not_run
+            self.blindness = {d.name: {"provenance": "executed", "classification": "not_run",
+                                       "reason": f"{type(exc).__name__}: {exc}", "runs": []}
+                              for d in self.selected}
+        for name, r in self.blindness.items():
+            self.say(f"{name}: test visibility = {r['classification']} ({r['reason']})", dep=name)
+        self.say("recording real calls of repository functions during the original tests", stage="record")
+        targets, self.replay_targets = [], {}
+        for d in self.selected:
+            self.replay_targets[d.name] = replay.targets_for(repo, d)
+            seen = {t["function"] for t in targets}
+            targets += [t for t in self.replay_targets[d.name] if t["function"] not in seen]
+        try:
+            self.recording = replay.record(b0["env"], b0["repo"], targets, self.work / "record")
+        except Exception as exc:
+            self.recording = {"error": f"{type(exc).__name__}: {exc}", "targets": targets, "calls": {}}
+        n = sum(len(v) for v in self.recording.get("calls", {}).values())
+        self.say(f"recorded {n} calls of {len([t for t in targets if t['replayable']])} functions"
+                 + (f" (error: {self.recording['error']})" if self.recording.get("error") else ""))
 
     def _parallel(self, fn, deps: list) -> None:
         with ThreadPoolExecutor(max_workers=max(1, self.jobs)) as ex:
@@ -376,6 +406,7 @@ class Pipeline:
                                          "text": "Code rewrite needs Gemma, which is unavailable"})
         code_expected = bool(self.llm and plan.get("needs_code_changes") and orig_texts)
         res["verification_requirements"] = verification.requirements_for(plan, self.pythons, code_expected)
+        res["test_blindness"] = getattr(self, "blindness", {}).get(name)
         self.say(f"{name}: plan = {plan['action']} {plan.get('package') or plan.get('stdlib_module') or ''}"
                  f"{plan.get('specifier') or ''} ({provenance})", dep=name)
         if plan["action"] == "keep":
@@ -427,7 +458,7 @@ class Pipeline:
             self.say(f"{name}: attempt {attempt}: {att['evaluation']['status']}", dep=name)
             if att["clean"] or not self.llm or attempt >= self.max_fix:
                 break
-            feedback = failure_feedback(att["comparison"], self.modules, att["residual"])
+            feedback = failure_feedback(att["comparison"], self.modules, att["residual"], att.get("replay"))
             if not feedback or not orig_texts:
                 break
             # a manifest-only change broke something: let Gemma adapt the code next time
@@ -436,10 +467,11 @@ class Pipeline:
                      f"({len(feedback)} chars of evidence)", dep=name)
         res.update({k: best[k] for k in ("comparison", "edits", "manifest_files", "patch", "repo", "residual")})
         res["verification"] = best["evaluation"]
+        res["replay"] = best.get("replay")
         res["status"] = best["evaluation"]["status"]
-        res["status_reason"] = "; ".join(
-            f"{r['id']}: {r['result']}" for r in best["evaluation"]["requirements"]
-            if r["result"] != verification.MET and r["required"]) or None
+        unmet = "; ".join(f"{r['id']}: {r['result']}" for r in best["evaluation"]["requirements"]
+                          if r["result"] != verification.MET and r["required"])
+        res["status_reason"] = best["evaluation"]["verdict_reason"] + (f" [{unmet}]" if unmet else "")
 
         # --- AI review of executed results ---------------------------------
         if self.llm:
@@ -486,9 +518,18 @@ class Pipeline:
                     lambda p: self._verify(dep, plan, rcopy, adir / f"py{p}", p, probe_file),
                     self.pythons)):
                 comparison[py] = c
+        envs = {py: c.pop("_env", None) for py, c in comparison.items()}
+        rp = self._replay(dep, comparison, envs, rcopy, adir)
         code_expected = bool(edits) or bool(self.llm and plan.get("needs_code_changes") and orig_texts)
         reqs = verification.requirements_for(plan, self.pythons, code_expected)
         evaluation = verification.evaluate(plan, reqs, comparison, residual)
+        rq = verification.replay_requirement(rp)
+        if rq:
+            evaluation["requirements"].append(rq)
+            evaluation["status"] = verification.status_from(evaluation["requirements"])
+        evaluation["base_status"] = evaluation["status"]
+        evaluation["status"], evaluation["verdict_reason"] = verification.final_verdict(
+            evaluation["status"], getattr(self, "blindness", {}).get(dep.name), rp)
         clean = verification.is_clean(evaluation)
         summary = {"dir": str(adir.relative_to(self.out)), "feedback_given": bool(feedback),
                    "edited_files": sorted(edits), "clean": clean, "status": evaluation["status"],
@@ -500,12 +541,33 @@ class Pipeline:
         summary["residual_usage"] = len(residual)
         return {"comparison": comparison, "edits": edits, "manifest_files": manifest_files,
                 "patch": patch, "repo": rcopy, "clean": clean, "summary": summary, "residual": residual,
-                "evaluation": evaluation}
+                "evaluation": evaluation, "replay": rp}
+
+    def _replay(self, dep, comparison, envs, rcopy, adir) -> dict | None:
+        """Replay recorded real calls on the migrated code (first Python, same as the recording)."""
+        fns = [t["function"] for t in getattr(self, "replay_targets", {}).get(dep.name, [])]
+        if not fns:
+            return None
+        py0 = self.pythons[0]
+        if not (comparison[py0].get("install_ok") and envs.get(py0)):
+            return {"provenance": "executed_recorded", "state": "not_run", "python": py0,
+                    "reason": "migrated project did not install", "counts": {}, "differences": [],
+                    "not_replayable": [], "skipped": [], "functions": []}
+        b0 = self.baselines[py0]
+        pr = comparison[py0].get("probes") or {}
+        psum = {k: pr.get(k) for k in ("executed", "total", "identical")} if pr else None
+        try:
+            return replay.replay(self.recording, fns, b0["env"], b0["repo"], envs[py0], rcopy,
+                                 adir / "replay", py0, psum)
+        except Exception as exc:
+            return {"provenance": "executed_recorded", "state": "not_run", "python": py0,
+                    "reason": f"{type(exc).__name__}: {exc}", "counts": {}, "differences": [],
+                    "not_replayable": [], "skipped": [], "functions": []}
 
     def _verify(self, dep, plan, rcopy: Path, vdir: Path, py: str, probe_file) -> dict:
         b = self.baselines[py]
         env = sandbox.create_env(rcopy, vdir / "venv", py)
-        out = {"python": env.pkgmap.get("python", py), "install_ok": env.ok,
+        out = {"_env": env, "python": env.pkgmap.get("python", py), "install_ok": env.ok,
                "install_cmds": [" ".join(c) for c in env.install_cmds]}
         if not env.ok:
             out["install_error"] = env.install_log[-3000:]
@@ -551,7 +613,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------ combined
     def combined(self, repo: Path, selected, results) -> dict | None:
-        ok = [d for d in selected if results.get(d.name, {}).get("status") in ("verified", "verified_with_gaps")]
+        ok = [d for d in selected if results.get(d.name, {}).get("status") in verification.PASSING]
         excluded = [{"dependency": d.name, "status": results[d.name].get("status")} for d in selected
                     if d not in ok and results.get(d.name, {}).get("status")
                     not in (None, "not_executed", "planned")]
