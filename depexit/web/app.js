@@ -143,6 +143,7 @@ function renderRun(v) {
   renderTiles(v.index);
   renderBaseline(v.index, v.execution_boundary);
   renderGraph(v.index, v.state);
+  renderEvidence(v.index);
   renderDeps(v.index, v.state, v.executable !== false);
   renderCombined(v.index, v.state);
   if (current) openDep(current, true);
@@ -606,3 +607,115 @@ window.addEventListener("hashchange", async () => {
   if (!want || (job && job.id === want)) return;
   try { attach(await api(`/api/jobs/${want}`)); } catch (e) { /* unknown run */ }
 });
+
+// ------------------------------------------------------------------ evidence quality (blindness + replay)
+const MODES = ["raise", "none", "wrong"];
+const MX_LABEL = { detected: "✓ detected", undetected: "✗ undetected", not_exercised: "∅ never called",
+  not_run: "⚠ not run", na: "–" };
+let evidenceKey = null;
+
+function modeCell(runs, mode) {
+  const rs = (runs || []).filter((r) => r.mode === mode);
+  if (!rs.length) {
+    const broken = (runs || []).filter((r) => r.outcome === "not_run");
+    return broken.length ? { k: "not_run", tip: broken.map((r) => `${r.symbol}: ${r.reason}`).join("; ") }
+      : { k: "na", tip: "mode not applicable to these symbols" };
+  }
+  const tip = rs.map((r) => `${r.symbol}: ${r.outcome}${r.calls != null ? ` (${r.calls} calls)` : ""}${r.reason ? ` - ${r.reason}` : ""}`).join("\n");
+  if (rs.some((r) => r.outcome === "detected")) return { k: "detected", tip };
+  if (rs.some((r) => r.outcome === "undetected")) return { k: "undetected", tip };
+  if (rs.some((r) => r.outcome === "not_run")) return { k: "not_run", tip };
+  if (rs.every((r) => r.outcome === "not_applicable")) return { k: "na", tip };
+  return { k: "not_exercised", tip };
+}
+
+function replayBar(rp) {
+  if (!rp) return h("span", { class: "muted small" }, "–");
+  const c = rp.counts || {};
+  const same = c.identical || 0, diff = (c.different || 0) + (c.exception_changed || 0), nr = c.not_replayable || 0;
+  const tot = same + diff + nr;
+  if (rp.state !== "compared" || !tot) {
+    const why = { no_recorded_calls: "no test called these functions", no_targets: "no function to record",
+      not_run: "replay could not run", not_applicable: "not used by code" }[rp.state] || rp.state || "not executed yet";
+    return h("div", { class: "rcell" }, h("span", { class: "ev-sub" }, why));
+  }
+  const w = (n) => `width:${(100 * n / tot).toFixed(1)}%`;
+  return h("div", { class: "rcell", title: `${same} identical · ${diff} different · ${nr} not replayable` },
+    h("div", { class: "rbar" }, h("i", { class: "s", style: w(same) }), h("i", { class: "d", style: w(diff) }), h("i", { class: "n", style: w(nr) })),
+    h("span", { class: "ev-sub" }, `${same} identical · `, diff ? h("b", { style: "color:var(--bad)" }, `${diff} different`) : "0 different", ` · ${nr} n/r`));
+}
+
+function findingsFor(rows) {
+  const out = [];
+  for (const { d, c } of rows) {
+    const tb = c.test_blindness || {}, rp = c.replay || {}, cnt = rp.counts || {};
+    const diff = (cnt.different || 0) + (cnt.exception_changed || 0);
+    if (diff) {
+      const x = (rp.differences || [])[0] || {};
+      out.push(["bad", "✗", h("span", {}, h("b", {}, d.name), `: the tests pass, but replaying ${diff} real recorded call(s) gives a different result. `,
+        code(x.function || ""), " returned ", code(String(x.original)), " before and ", code(String(x.replacement)), " after",
+        x.test ? ` (recorded in ${x.test})` : "", ".")]);
+    } else if (tb.classification === "not_exercised") {
+      out.push(["warn", "∅", h("span", {}, h("b", {}, d.name), ": no test ever calls ", (tb.symbols || []).flatMap((s, i) => [i ? ", " : "", code(s)]),
+        ", so a passing suite proves nothing about this dependency", d.status === "verified_by_replay" ? ", but real recorded calls replayed identically." : ".")]);
+    } else if (tb.classification === "blind" || tb.classification === "partly_blind") {
+      const undetected = [...new Set((tb.runs || []).filter((r) => r.outcome === "undetected").map((r) => r.mode))];
+      out.push(["warn", "◐", h("span", {}, h("b", {}, d.name), `: the tests are ${tb.classification.replace("_", " ")}; sabotage mode(s) `,
+        undetected.flatMap((m, i) => [i ? ", " : "", code(m)]), " went unnoticed.")]);
+    } else if (tb.classification === "not_run") {
+      out.push(["", "⚠", h("span", {}, h("b", {}, d.name), ": blindness check could not run: ", clip(tb.reason || "", 140))]);
+    } else if (tb.classification === "watched" && cnt.identical && !diff) {
+      out.push(["ok", "✓", h("span", {}, h("b", {}, d.name), `: watched by ${(tb.catching_tests || []).length} test(s), and ${cnt.identical} real recorded call(s) replay identically.`)]);
+    }
+  }
+  const rank = { bad: 0, warn: 1, "": 2, ok: 3 };
+  return out.sort((a, b) => rank[a[0]] - rank[b[0]]).slice(0, 8)
+    .map(([tone, ic, body]) => h("div", { class: "finding " + tone }, h("span", { class: "ic" }, ic), body));
+}
+
+async function renderEvidence(ix) {
+  const card = $("#evidence-card"), box = $("#evidence");
+  const deps = ix.dependencies.filter((d) => d.capsule);
+  if (!deps.length) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  if (!deps.some((d) => "test_visibility" in d)) {
+    box.replaceChildren(h("div", { class: "callout info" }, h("b", {}, "No evidence-quality data in this run. "),
+      "It was produced before the test-blindness and replay checks existed. Re-analyse the repository to see them.",
+      job && job.target ? h("button", { class: "secondary", type: "button", style: "margin-left:8px", onclick: reanalyse }, "Re-analyse") : null));
+    return;
+  }
+  const key = `${job.id}:${ix.generated_at}:${deps.map((d) => d.status).join(",")}`;
+  if (key === evidenceKey) return;
+  evidenceKey = key;
+  box.replaceChildren(h("p", { class: "muted small" }, "Loading capsules…"));
+  const rows = (await Promise.all(deps.map(async (d) => {
+    try { return { d, c: (await api(`/api/jobs/${job.id}/capsules/${encodeURIComponent(d.name)}`)).capsule }; }
+    catch (e) { return null; }
+  }))).filter(Boolean);
+  const counts = {};
+  rows.forEach(({ c }) => { const k = (c.test_blindness || {}).classification || "not_applicable"; counts[k] = (counts[k] || 0) + 1; });
+  const table = h("table", { class: "data" },
+    h("thead", {}, h("tr", {}, ...["Dependency", "Test visibility", "raise", "none", "wrong", "Calls in tests", "Replay (real recorded calls)", "Verdict"].map((t) => h("th", {}, t)))),
+    h("tbody", {}, rows.map(({ d, c }) => {
+      const tb = c.test_blindness || {};
+      const calls = Object.values(tb.calls || {}).reduce((a, b) => a + b, 0);
+      return h("tr", { class: "clickable", onclick: () => { tab = "Verification"; openDep(d.name); } },
+        h("td", {}, h("div", { class: "dep-name" }, d.name), h("div", { class: "ev-sub" }, (tb.symbols || []).slice(0, 2).join(", "))),
+        h("td", {}, vis(tb.classification || "not_applicable", tb.reason)),
+        ...MODES.map((m) => { const x = modeCell(tb.runs, m); return h("td", {}, h("span", { class: "mx mx-" + x.k, title: x.tip }, MX_LABEL[x.k])); }),
+        h("td", { class: "num" }, tb.runs && tb.runs.length ? calls : "–"),
+        h("td", {}, replayBar(c.replay)),
+        h("td", {}, status(c.status)));
+    })));
+  const diffs = rows.flatMap(({ d, c }) => ((c.replay || {}).differences || []).map((x) => ({ dep: d.name, ...x })));
+  box.replaceChildren(
+    h("div", { class: "counts" }, ...Object.entries(counts).map(([k, n]) => h("span", {}, vis(k), ` ${n}`))),
+    h("div", { class: "findings" }, findingsFor(rows)),
+    h("div", { class: "table-wrap" }, table),
+    diffs.length ? h("div", {}, h("h3", {}, "Behaviour changes found by replay ", h("span", { class: "prov executed" }, "executed · recorded data")),
+      h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, ...["Dependency", "Function", "Input", "Original output", "Replacement output", "Source test"].map((t) => h("th", {}, t)))),
+        h("tbody", {}, diffs.map((x) => h("tr", { class: "diff-row" }, h("td", {}, h("b", {}, x.dep)), h("td", {}, code(x.function)),
+          h("td", {}, code(clip(x.input, 50))), h("td", {}, code(clip(String(x.original), 50))), h("td", {}, code(clip(String(x.replacement), 50))),
+          h("td", { class: "small" }, x.test || "–"))))))) : null);
+}

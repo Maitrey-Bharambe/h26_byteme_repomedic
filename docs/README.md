@@ -10,6 +10,7 @@ the original and the migrated code. Each exit becomes a *Dependency Exit Capsule
 
 | Page | What's in it |
 |---|---|
+| **[Technical approach](technical-approach.md)** | The whole design end to end: pipeline, Gemma integration, verification model, test blindness, replay, security, results on LinkWatch, limitations |
 | [Getting started](getting-started.md) | Install, first run on LinkWatch, CLI and web UI |
 | [Architecture](architecture.md) | Pipeline stages, modules, data flow |
 | [Verification semantics](verification.md) | Requirements, statuses, and why "skipped" never means "passed" |

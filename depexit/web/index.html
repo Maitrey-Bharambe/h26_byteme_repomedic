@@ -77,6 +77,19 @@
     <div id="graph" class="graph-wrap"></div>
   </section>
 
+  <section class="card hidden" id="evidence-card">
+    <div class="card-head">
+      <div><h2>Evidence quality: can the tests even see each dependency?</h2>
+        <div class="muted small">Test blindness sabotages each used symbol (raise · return None · return a wrong value) and re-runs the
+          original tests. Replay re-runs real calls recorded during those tests against the migrated code.</div></div>
+      <div class="legend">
+        <span class="mx mx-detected">detected</span><span class="mx mx-undetected">undetected</span>
+        <span class="mx mx-not_exercised">never called</span><span class="mx mx-not_run">not run</span><span class="mx mx-na">n/a</span>
+      </div>
+    </div>
+    <div id="evidence"></div>
+  </section>
+
   <section class="card hidden" id="deps-card">
     <div class="card-head">
       <div><h2>Risk explorer &amp; migration workbench</h2>

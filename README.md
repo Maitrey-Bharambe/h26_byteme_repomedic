@@ -203,7 +203,7 @@ recorded calls identical), `weakly_verified` (tests blind, nothing real replayed
 
 ## Documentation
 
-Full docs are in [`docs/`](docs/README.md): [getting started](docs/getting-started.md) ·
+Full docs are in [`docs/`](docs/README.md). Start with the **[technical approach](docs/technical-approach.md)**, then: [getting started](docs/getting-started.md) ·
 [architecture](docs/architecture.md) · [verification semantics](docs/verification.md) ·
 [web workbench](docs/web-ui.md) · [HTTP API](docs/http-api.md) ·
 [capsule format](docs/capsule-format.md) · [configuration](docs/configuration.md) ·

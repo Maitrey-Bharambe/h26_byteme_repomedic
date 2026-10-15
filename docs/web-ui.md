@@ -46,6 +46,20 @@ target) → **individual verification** (status and the first unmet requirement)
 
 Click any node to open its capsule.
 
+## Evidence quality
+Shows whether the original tests can see each dependency, and what replaying real data
+showed:
+- **Findings**: plain-language headlines, most severe first (for example "chardet: the tests
+  pass, but replaying 1 real recorded call gives a different result…").
+- **Sabotage matrix**: one row per dependency, with a cell per mode (`raise` / `none` /
+  `wrong`): ✓ detected, ✗ undetected, ∅ never called, ⚠ not run. Hover a cell for the
+  symbols and call counts. Also shows the number of calls made by the tests, a replay bar
+  (identical / different / not replayable) and the verdict. Click a row for the capsule.
+- **Behaviour changes found by replay**: every differing recorded call, highlighted red,
+  with input, original output, replacement output and the test that recorded it.
+
+Runs produced before these checks existed say so and offer *Re-analyse*.
+
 ## 4 · Risk explorer & migration workbench
 One row per dependency with indicators: a severity bar and score, indicator tags, the
 planned action, and the status. Tick **planned** rows and click **Migrate & verify**. Each
